@@ -3872,25 +3872,6 @@ DEFPY(no_bgp_evpn_vni_srv6, no_bgp_evpn_vni_srv6_cmd,
 	return CMD_SUCCESS;
 }
 
-/* Dynamic MAC notifications from the existing VPP EVPN plugin adapter.
- * Deliberately not serialized by write_vni_config: VPP owns the local FDB. */
-DEFPY(bgp_evpn_vni_srv6_mac, bgp_evpn_vni_srv6_mac_cmd,
-      "[no] srv6 mac X:X:X:X:X:X$mac",
-      NO_STR "Native SRv6 Ethernet service\n" "Local MAC notification\n"
-      "MAC address\n")
-{
-	VTY_DECLVAR_CONTEXT(bgp, bgp);
-	VTY_DECLVAR_CONTEXT_SUB(bgpevpn, vpn);
-	struct ipaddr ip = {};
-	if (!vpn->srv6_l2)
-		return CMD_WARNING;
-	if (no)
-		return bgp_evpn_local_macip_del(bgp, vpn->vni, &mac->eth_addr, &ip,
-					      ZEBRA_NEIGH_ACTIVE) ? CMD_WARNING : CMD_SUCCESS;
-	return bgp_evpn_local_macip_add(bgp, vpn->vni, &mac->eth_addr, &ip, 0, 0, NULL)
-		       ? CMD_WARNING : CMD_SUCCESS;
-}
-
 DEFPY(show_ip_bgp_l2vpn_evpn_neighbor_routes,
       show_ip_bgp_l2vpn_evpn_neighbor_routes_cmd,
       "show [ip] bgp l2vpn evpn neighbors <A.B.C.D|X:X::X:X|WORD>$neighbor routes [json$uj [brief$brief]]",
@@ -8454,7 +8435,6 @@ void bgp_ethernetvpn_init(void)
 
 	install_element(BGP_EVPN_VNI_NODE, &bgp_evpn_vni_srv6_cmd);
 	install_element(BGP_EVPN_VNI_NODE, &no_bgp_evpn_vni_srv6_cmd);
-	install_element(BGP_EVPN_VNI_NODE, &bgp_evpn_vni_srv6_mac_cmd);
 
 	/* "show bgp vni" commands. */
 	install_element(VIEW_NODE, &show_bgp_vni_all_cmd);
