@@ -15,6 +15,8 @@
  */
 struct bgp_attr_srv6_l3service {
 	unsigned long refcnt;
+	/* RFC 9252 service TLV type; zero preserves legacy L3 callers. */
+	uint8_t service_type;
 	uint8_t sid_flags;
 	uint16_t endpoint_behavior;
 	struct in6_addr sid;

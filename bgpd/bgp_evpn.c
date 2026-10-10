@@ -1404,10 +1404,12 @@ static void build_evpn_route_extcomm(struct bgpevpn *vpn, struct attr *attr, int
 	ecom = ecommunity_new();
 
 	/* Encap. This is the first community; the ones below extend it. */
-	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	encode_encap_extcomm(tnl_type, &eval_tmp);
-	ecommunity_append_val_unchecked(ecom, &eval_tmp);
-	attr->encap_tunneltype = tnl_type;
+	if (!vpn->srv6_l2) {
+		tnl_type = BGP_ENCAP_TYPE_VXLAN;
+		encode_encap_extcomm(tnl_type, &eval_tmp);
+		ecommunity_append_val_unchecked(ecom, &eval_tmp);
+		attr->encap_tunneltype = tnl_type;
+	}
 
 	/* Add the export RTs for L2VNI (the effective export list is
 	 * sorted and duplicate free)
@@ -1460,6 +1462,26 @@ static void build_evpn_route_extcomm(struct bgpevpn *vpn, struct attr *attr, int
 	 * so it must see the fully built (non-empty) community.
 	 */
 	bgp_attr_set_ecommunity(attr, ecom);
+}
+
+/* Full SID encoding (no label transposition), RFC 9252 sections 6.2/6.3.
+ * The VNI remains the MAC-VRF identifier; no VXLAN encapsulation is used. */
+static void evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
+{
+	struct bgp_attr_srv6_l3service *service;
+
+	if (!vpn->srv6_l2)
+		return;
+	service = XCALLOC(MTYPE_BGP_SRV6_L3SERVICE, sizeof(*service));
+	service->service_type = BGP_PREFIX_SID_SRV6_L2_SERVICE;
+	service->sid = imet ? vpn->srv6_dt2m_sid : vpn->srv6_dt2u_sid;
+	service->endpoint_behavior = imet ? 24 : 23; /* End.DT2M / End.DT2U */
+	service->loc_block_len = 32;
+	service->loc_node_len = 16;
+	service->func_len = 80;
+	bgp_attr_set_srv6_l3service(attr, service);
+	bgp_attr_set(attr, BGP_ATTR_PREFIX_SID);
+	memset(&attr->label, 0, sizeof(attr->label));
 }
 
 /*
@@ -1528,6 +1550,11 @@ enum zclient_send_status evpn_zebra_install(struct bgp *bgp, struct bgpevpn *vpn
 	uint32_t seq;
 	enum zclient_send_status ret = ZCLIENT_SEND_SUCCESS;
 	struct ipaddr vtep_ip = { .ipa_type = IPADDR_V4, .ipaddr_v4 = { INADDR_ANY } };
+
+	if (vpn->srv6_l2) {
+		bgp_evpn_srv6_notify(vpn, p, pi, true);
+		return ZCLIENT_SEND_SUCCESS;
+	}
 
 	if (p->prefix.route_type == BGP_EVPN_MAC_IP_ROUTE) {
 		flags = 0;
@@ -1641,6 +1668,11 @@ enum zclient_send_status evpn_zebra_uninstall(struct bgp *bgp,
 {
 	enum zclient_send_status ret = ZCLIENT_SEND_SUCCESS;
 	struct ipaddr vtep_ip;
+
+	if (vpn->srv6_l2) {
+		bgp_evpn_srv6_notify(vpn, p, pi, false);
+		return ZCLIENT_SEND_SUCCESS;
+	}
 
 	if (p->prefix.route_type == BGP_EVPN_MAC_IP_ROUTE) {
 		uint8_t nhfamily = NEXTHOP_FAMILY(pi->attr->mp_nexthop_len);
@@ -2356,7 +2388,10 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 		bgp_path_info_extra_get(tmp_pi);
 
 		/* The VNI goes into the 'label' field of the route */
-		vni2label(vpn->vni, &bgp_labels.label[0]);
+		if (vpn->srv6_l2)
+			memset(&bgp_labels.label[0], 0, sizeof(bgp_labels.label[0]));
+		else
+			vni2label(vpn->vni, &bgp_labels.label[0]);
 		bgp_labels.num_labels = 1;
 
 		/* Type-2 routes may carry a second VNI - the L3-VNI.
@@ -2400,7 +2435,10 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 			 * The attributes have changed, type-2 routes needs to
 			 * be advertised with right labels.
 			 */
-			vni2label(vpn->vni, &bgp_labels.label[0]);
+			if (vpn->srv6_l2)
+				memset(&bgp_labels.label[0], 0, sizeof(bgp_labels.label[0]));
+			else
+				vni2label(vpn->vni, &bgp_labels.label[0]);
 			bgp_labels.num_labels = 1;
 			if (bgp_evpn_is_macip_with_l3vni(vpn, evp)) {
 				vni_t l3vni;
@@ -2622,6 +2660,7 @@ static int update_evpn_route(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
+	evpn_srv6_l2_attr(vpn, &attr, p->prefix.route_type == BGP_EVPN_IMET_ROUTE);
 
 	/* First, create (or fetch) route node within the VNI.
 	 * NOTE: There is no RD here.
@@ -2911,6 +2950,7 @@ void bgp_evpn_update_type2_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
+	evpn_srv6_l2_attr(vpn, &attr, false);
 	seq = mac_mobility_seqnum(local_pi->attr);
 
 	if (bgp_debug_zebra(NULL)) {

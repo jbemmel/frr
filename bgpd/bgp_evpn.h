@@ -255,4 +255,10 @@ extern void bgp_zebra_evpn_pop_items_from_announce_fifo(struct bgpevpn *vpn);
 extern int install_uninstall_routes_for_vni(struct bgp *bgp, struct bgpevpn *vpn, bool install);
 extern void bgp_evpn_fill_rmac_nh_to_attr(struct bgp *bgp_vrf, struct attr *attr,
 					  struct prefix_evpn *evp, struct ipaddr *vtep_ip);
+extern int bgp_evpn_srv6_agent_start(void);
+extern void bgp_evpn_srv6_local_sync(struct bgpevpn *vpn);
+extern void bgp_evpn_srv6_notify(struct bgpevpn *vpn,
+                               const struct prefix_evpn *p,
+                               struct bgp_path_info *pi, bool add);
+
 #endif /* _QUAGGA_BGP_EVPN_H */
