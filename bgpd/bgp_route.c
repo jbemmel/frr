@@ -12455,8 +12455,16 @@ void route_vty_out(struct vty *vty, const struct prefix *p, struct bgp_path_info
 	bool ll_nexthop_only = attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV6_GLOBAL &&
 			       PEER_HAS_LINK_LOCAL_CAPABILITY(path->peer);
 
-	if (json_paths)
+	if (json_paths) {
 		json_path = json_object_new_object();
+		struct bgp_attr_srv6_l3service *service = bgp_attr_get_srv6_l3service(attr);
+		if (service && service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE) {
+			json_object_string_addf(json_path, "remoteSid", "%pI6", &service->sid);
+			json_object_int_add(json_path, "srv6EndpointBehavior", service->endpoint_behavior);
+			json_object_int_add(json_path, "srv6TranspositionLength", service->transposition_len);
+			json_object_string_add(json_path, "prefixSidType", "l2");
+		}
+	}
 
 	/* short status lead text */
 	route_vty_short_status_out(vty, path, p, json_path);
@@ -13586,7 +13594,8 @@ static void route_vty_out_detail_remote_sid(struct vty *vty, struct bgp_path_inf
 		json_object_string_add(json_path, "endpointBehavior",
 				       srv6_endpoint_behavior_codepoint2str(
 					       srv6_l3service->endpoint_behavior));
-		json_object_string_add(json_path, "prefixSidType", "l3");
+		json_object_string_add(json_path, "prefixSidType",
+				       srv6_l3service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE ? "l2" : "l3");
 
 		json_sid_attr = json_object_new_object();
 		json_object_object_add(json_path, "remoteSidStructure", json_sid_attr);
