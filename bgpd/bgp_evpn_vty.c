@@ -3813,11 +3813,64 @@ static void write_vni_config(struct vty *vty, struct bgpevpn *vpn)
 		if (vpn->advertise_subnet)
 			vty_out(vty, "   advertise-subnet\n");
 
+		if (vpn->srv6_l2)
+			vty_out(vty, "   srv6 source %pI6 unicast %pI6 multicast %pI6\n",
+				&vpn->originator_ip.ipaddr_v6, &vpn->srv6_dt2u_sid,
+				&vpn->srv6_dt2m_sid);
 		vty_out(vty, "  exit-vni\n");
 	}
 }
 
 #include "bgpd/bgp_evpn_vty_clippy.c"
+
+/* VPP provisions the MAC-VRF independently of kernel VXLAN metadata. */
+DEFPY(bgp_evpn_vni_srv6, bgp_evpn_vni_srv6_cmd,
+      "srv6 source X:X::X:X$source unicast X:X::X:X$unicast multicast X:X::X:X$multicast",
+      "Native SRv6 Ethernet service\n"
+      "Encapsulation source\n" "IPv6 loopback address\n"
+      "Unicast bridge SID\n" "End.DT2U SID\n"
+      "Flood bridge SID\n" "End.DT2M SID\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	VTY_DECLVAR_CONTEXT_SUB(bgpevpn, vpn);
+
+	if (IN6_IS_ADDR_UNSPECIFIED(&source) || IN6_IS_ADDR_MULTICAST(&source) ||
+	    IN6_IS_ADDR_UNSPECIFIED(&unicast) || IN6_IS_ADDR_MULTICAST(&unicast) ||
+	    IN6_IS_ADDR_UNSPECIFIED(&multicast) || IN6_IS_ADDR_MULTICAST(&multicast) ||
+	    IPV6_ADDR_SAME(&unicast, &multicast))
+		return CMD_WARNING;
+	if (is_vni_live(vpn) && !vpn->srv6_l2) {
+		vty_out(vty, "%% VNI already has a kernel VXLAN dataplane\n");
+		return CMD_WARNING;
+	}
+	if (bgp_evpn_srv6_agent_start()) {
+		vty_out(vty, "%% Cannot start SRv6 EVPN agent socket: %s\n", strerror(errno));
+		return CMD_WARNING;
+	}
+	if (vpn->srv6_l2)
+		bgp_evpn_handle_rd_change(bgp, vpn, 1);
+	vpn->srv6_l2 = true;
+	vpn->srv6_dt2u_sid = unicast;
+	vpn->srv6_dt2m_sid = multicast;
+	ipaddr_set_v6(&vpn->originator_ip, &source);
+	SET_FLAG(vpn->flags, VNI_FLAG_LIVE);
+	update_routes_for_vni(bgp, vpn);
+	install_uninstall_routes_for_vni(bgp, vpn, true);
+	bgp_evpn_srv6_local_sync(vpn);
+	return CMD_SUCCESS;
+}
+
+DEFPY(no_bgp_evpn_vni_srv6, no_bgp_evpn_vni_srv6_cmd,
+      "no srv6", NO_STR "Native SRv6 Ethernet service\n")
+{
+	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	VTY_DECLVAR_CONTEXT_SUB(bgpevpn, vpn);
+	if (vpn->srv6_l2) {
+		bgp_evpn_local_vni_del(bgp, vpn->vni);
+		vpn->srv6_l2 = false;
+	}
+	return CMD_SUCCESS;
+}
 
 DEFPY(show_ip_bgp_l2vpn_evpn_neighbor_routes,
       show_ip_bgp_l2vpn_evpn_neighbor_routes_cmd,
@@ -5577,6 +5630,9 @@ DEFPY(show_bgp_l2vpn_evpn_route_vni, show_bgp_l2vpn_evpn_route_vni_cmd,
 		json = json_object_new_object();
 
 	evpn_show_routes_vni(vty, bgp, vni, type, false, vtep_ip, json);
+	struct bgpevpn *vpn = bgp_evpn_lookup_vni(bgp, vni);
+	if (vpn && vpn->srv6_l2 && (!type || type == BGP_EVPN_MAC_IP_ROUTE))
+		evpn_show_routes_vni(vty, bgp, vni, type, true, vtep_ip, json);
 
 	if (uj)
 		vty_json(vty, json);
@@ -8376,6 +8432,9 @@ void bgp_ethernetvpn_init(void)
 			&show_bgp_l2vpn_evpn_route_mac_ip_global_es_cmd);
 	install_element(VIEW_NODE, &show_bgp_l2vpn_evpn_import_rt_cmd);
 	install_element(VIEW_NODE, &show_bgp_l2vpn_evpn_vrf_import_rt_cmd);
+
+	install_element(BGP_EVPN_VNI_NODE, &bgp_evpn_vni_srv6_cmd);
+	install_element(BGP_EVPN_VNI_NODE, &no_bgp_evpn_vni_srv6_cmd);
 
 	/* "show bgp vni" commands. */
 	install_element(VIEW_NODE, &show_bgp_vni_all_cmd);
