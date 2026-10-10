@@ -69,6 +69,7 @@ DEFINE_MTYPE_STATIC(BMP, BMP_TARGETS,	"BMP targets");
 DEFINE_MTYPE_STATIC(BMP, BMP_TARGETSNAME, "BMP targets name");
 DEFINE_MTYPE_STATIC(BMP, BMP_LISTENER,	"BMP listener");
 DEFINE_MTYPE_STATIC(BMP, BMP_ACTIVE,	"BMP active connection config");
+DEFINE_MTYPE_STATIC(BMP, BMP_ACTIVE_QUERY, "BMP active DNS query");
 DEFINE_MTYPE_STATIC(BMP, BMP_ACLNAME,	"BMP access-list name");
 DEFINE_MTYPE_STATIC(BMP, BMP_QUEUE,	"BMP update queue item");
 DEFINE_MTYPE_STATIC(BMP, BMP,		"BMP instance state");
@@ -2757,11 +2758,33 @@ static struct bmp_active *bmp_active_get(struct bmp_targets *bt,
 	return ba;
 }
 
+struct bmp_active_query {
+	struct resolver_query query;
+	struct bmp_active *active;
+};
+
+static void bmp_active_resolve_detach(struct bmp_active *ba)
+{
+	if (!ba->resq)
+		return;
+
+	/* c-ares queries cannot be cancelled individually. Keep their storage
+	 * until completion, but prevent obsolete results from reaching ba.
+	 */
+	ba->resq->active = NULL;
+	if (ba->resq->query.literal_cb) {
+		event_cancel(&ba->resq->query.literal_cb);
+		XFREE(MTYPE_BMP_ACTIVE_QUERY, ba->resq);
+	}
+	ba->resq = NULL;
+}
+
 static void bmp_active_put(struct bmp_active *ba)
 {
 	event_cancel(&ba->t_timer);
 	event_cancel(&ba->t_read);
 	event_cancel(&ba->t_write);
+	bmp_active_resolve_detach(ba);
 
 	bmp_actives_del(&ba->targets->actives, ba);
 
@@ -2908,10 +2931,19 @@ static void bmp_active_connect(struct bmp_active *ba)
 static void bmp_active_resolved(struct resolver_query *resq, const char *errstr,
 				int numaddrs, union sockunion *addr)
 {
-	struct bmp_active *ba = container_of(resq, struct bmp_active, resq);
+	struct bmp_active_query *query =
+		container_of(resq, struct bmp_active_query, query);
+	struct bmp_active *ba = query->active;
 	unsigned i;
 
+	if (!ba) {
+		XFREE(MTYPE_BMP_ACTIVE_QUERY, query);
+		return;
+	}
+	ba->resq = NULL;
+
 	if (numaddrs <= 0) {
+		XFREE(MTYPE_BMP_ACTIVE_QUERY, query);
 		zlog_warn("bmp[%s]: hostname resolution failed: %s",
 			  ba->hostname, errstr);
 		ba->last_err = errstr;
@@ -2929,6 +2961,7 @@ static void bmp_active_resolved(struct resolver_query *resq, const char *errstr,
 	ba->addrtotal = numaddrs;
 	for (i = 0; i < ba->addrtotal; i++)
 		memcpy(&ba->addrs[i], &addr[i], sizeof(ba->addrs[0]));
+	XFREE(MTYPE_BMP_ACTIVE_QUERY, query);
 
 	bmp_active_connect(ba);
 }
@@ -2956,7 +2989,9 @@ static void bmp_active_thread(struct event *t)
 		 * namespaces but does not bind DNS sockets to Linux VRF devices.
 		 * The transport VRF option does not add VRF device support for DNS.
 		 */
-		resolver_resolve(&ba->resq, AF_UNSPEC, vrf_id, ba->hostname,
+		ba->resq = XCALLOC(MTYPE_BMP_ACTIVE_QUERY, sizeof(*ba->resq));
+		ba->resq->active = ba;
+		resolver_resolve(&ba->resq->query, AF_UNSPEC, vrf_id, ba->hostname,
 				 bmp_active_resolved);
 		return;
 	}
@@ -3006,7 +3041,7 @@ static void bmp_active_setup(struct bmp_active *ba)
 
 	if (ba->bmp)
 		return;
-	if (ba->resq.callback)
+	if (ba->resq)
 		return;
 
 	if (ba->curretry > ba->maxretry)
@@ -3263,6 +3298,18 @@ DEFPY(bmp_connect,
 		XFREE(MTYPE_TMP, ba->vrfname);
 		if (vrfname)
 			ba->vrfname = XSTRDUP(MTYPE_TMP, vrfname);
+		event_cancel(&ba->t_timer);
+		event_cancel(&ba->t_read);
+		event_cancel(&ba->t_write);
+		bmp_active_resolve_detach(ba);
+		if (ba->socket != -1) {
+			close(ba->socket);
+			ba->socket = -1;
+		}
+		ba->addrpos = 0;
+		ba->addrtotal = 0;
+		sockunion_init(&ba->addrsrc);
+		ba->last_err = NULL;
 		if (ba->bmp) {
 			struct bmp *bmp = ba->bmp;
 
@@ -3568,7 +3615,7 @@ DEFPY(show_bmp,
 					state_str = "RetryWait";
 				} else if (event_is_scheduled(ba->t_read)) {
 					state_str = "Connecting";
-				} else if (ba->resq.callback) {
+				} else if (ba->resq) {
 					state_str = "Resolving";
 				}
 

@@ -175,7 +175,7 @@ struct bmp_active {
 	char *vrfname;
 	union sockunion addrsrc;
 
-	struct resolver_query resq;
+	struct bmp_active_query *resq;
 
 	unsigned curretry;
 	unsigned addrpos, addrtotal;
