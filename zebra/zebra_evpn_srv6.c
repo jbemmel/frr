@@ -245,11 +245,9 @@ static void sync_mac_resync(struct hash_bucket *bucket, void *arg)
 		zebra_evpn_sync_mac_dp_install(mac, !!(mac->flags & ZEBRA_MAC_LOCAL_INACTIVE),
 					       false, __func__);
 }
-static void resync(vni_t vni)
+static void resync(struct zebra_evpn *zevpn)
 {
-	struct zebra_evpn *zevpn = zebra_evpn_lookup(vni);
-	if (!zevpn)
-		return;
+	vni_t vni = zevpn->vni;
 	for (struct sid_entry *e = sids; e; e = e->next)
 		if (e->vni == vni)
 			send_sid(e);
@@ -271,11 +269,11 @@ static bool local_update(const struct evpn_srv6_msg *m)
 	if (!zevpn || !ifp || !zevpn->vxlan_if)
 		return false;
 	struct zebra_if *vxl = zevpn->vxlan_if->info;
+	struct zebra_if *zif = ifp->info;
 	if (m->op == EVPN_SRV6_SERVICE) {
 		if (vxl->brslave_info.br_if != ifp)
 			return false;
 	} else {
-		struct zebra_if *zif = ifp->info;
 		if (zif->brslave_info.br_if != vxl->brslave_info.br_if)
 			return false;
 		if (m->op == EVPN_SRV6_ES && !zebra_evpn_is_if_es_capable(zif))
@@ -305,24 +303,19 @@ static bool local_update(const struct evpn_srv6_msg *m)
 	o->msg = *m;
 	if (m->op == EVPN_SRV6_SERVICE) {
 		zebra_evpn_send_add_to_client(zevpn);
-		resync(vni);
+		resync(zevpn);
 	} else if (m->op == EVPN_SRV6_ES) {
-		struct zebra_if *zif = ifp->info;
 		esi_t esi;
 		memcpy(&esi, m->esi, 10);
-		if (!zebra_evpn_is_if_es_capable(zif))
-			return false;
 		zebra_evpn_es_df_pref_update(zif, ntohs(m->df_pref));
 		zebra_evpn_es_type0_esi_update(zif, &esi);
 		if (zif->es_info.es)
 			zebra_evpn_es_if_oper_state_change(zif,
 							   !!(m->flags & EVPN_SRV6_ES_OPER_UP));
-		resync(vni);
+		resync(zevpn);
 	} else {
 		struct ethaddr address;
 		memcpy(&address, m->key, 6);
-		if ((address.octet[0] & 1) || !memcmp(&address, (uint8_t[6]){ 0 }, 6))
-			return false;
 		zebra_evpn_add_update_local_mac(zebra_vrf_get_evpn(), zevpn, ifp, &address, 0,
 						false, false, false, NULL);
 	}
@@ -477,7 +470,8 @@ static int provider_process(struct zebra_dplane_provider *prov)
 			m.flags = 2;
 			ok = queue_update(&m, ctx_epoch);
 			const struct ipaddr *peers = dplane_ctx_get_br_port_sph_filters(ctx);
-			for (uint32_t i = 0; i < dplane_ctx_get_br_port_sph_filter_cnt(ctx); i++) {
+			uint32_t peer_count = dplane_ctx_get_br_port_sph_filter_cnt(ctx);
+			for (uint32_t i = 0; i < peer_count; i++) {
 				if (!IS_IPADDR_V6(&peers[i]))
 					continue;
 				m.op = EVPN_SRV6_PEER;
