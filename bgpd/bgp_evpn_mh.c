@@ -25,6 +25,7 @@
 #include "bgpd/bgp_table.h"
 #include "bgpd/bgp_route.h"
 #include "bgpd/bgp_attr.h"
+#include "bgpd/bgp_attr_srv6.h"
 #include "bgpd/bgp_mplsvpn.h"
 #include "bgpd/bgp_evpn.h"
 #include "bgpd/bgp_evpn_private.h"
@@ -502,7 +503,8 @@ int bgp_evpn_mh_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 			bgp_path_info_extra_get(tmp_pi);
 			bgp_labels.num_labels = 1;
 			if (vpn)
-				vni2label(vpn->vni, &bgp_labels.label[0]);
+				vni2label(vpn->srv6_l2 ? 0x30 : vpn->vni,
+					  &bgp_labels.label[0]);
 			if (!bgp_path_info_labels_same(tmp_pi,
 						       &bgp_labels.label[0],
 						       bgp_labels.num_labels)) {
@@ -957,6 +959,23 @@ static int bgp_evpn_type4_remote_routes_import(struct bgp *bgp,
  * 2. EAD-per-EVI - Key: {ESI, ET=0}
  */
 
+/* Native ES fragments cannot advertise VXLAN encapsulation. Mixed transport
+ * fragments retain existing behavior; native-only fragments carry SRv6. */
+static struct bgpevpn *native_es_fragment(struct bgp_evpn_es_frag *fragment)
+{
+	struct listnode *node;
+	struct bgp_evpn_es_evi *association;
+	struct bgpevpn *native = NULL;
+	for (ALL_LIST_ELEMENTS_RO(fragment->es_evi_frag_list, node, association)) {
+		if (!CHECK_FLAG(association->flags, BGP_EVPNES_EVI_LOCAL))
+			continue;
+		if (!association->vpn->srv6_l2)
+			return NULL;
+		native = association->vpn;
+	}
+	return native;
+}
+
 /* Extended communities associated with EAD-per-ES */
 static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
 						  struct attr *attr)
@@ -972,12 +991,16 @@ static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_fr
 	ecom = ecommunity_new();
 
 	/* Encap. This is the first community; the ones below extend it. */
-	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	encode_encap_extcomm(tnl_type, &eval_tmp);
-	ecommunity_append_val_unchecked(ecom, &eval_tmp);
+	if (!native_es_fragment(es_frag)) {
+		tnl_type = BGP_ENCAP_TYPE_VXLAN;
+		encode_encap_extcomm(tnl_type, &eval_tmp);
+		ecommunity_append_val_unchecked(ecom, &eval_tmp);
+	}
 
 	/* ESI label */
 	encode_esi_label_extcomm(&eval_tmp, false /*single_active*/);
+	if (native_es_fragment(es_frag))
+		eval_tmp.val[7] = 0x30; /* RFC 9252: Implicit NULL, no Arg.FE2. */
 	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* Add export RTs for all L2-VNIs associated with this ES */
@@ -1019,9 +1042,11 @@ static void bgp_evpn_type1_evi_route_extcomm_build(struct bgp_evpn_es *es, struc
 	ecom = ecommunity_new();
 
 	/* Encap. This is the first community; the export RTs below extend it. */
-	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	encode_encap_extcomm(tnl_type, &eval_tmp);
-	ecommunity_append_val_unchecked(ecom, &eval_tmp);
+	if (!vpn->srv6_l2) {
+		tnl_type = BGP_ENCAP_TYPE_VXLAN;
+		encode_encap_extcomm(tnl_type, &eval_tmp);
+		ecommunity_append_val_unchecked(ecom, &eval_tmp);
+	}
 
 	/* Add export RTs for the L2-VNI. */
 	frr_each (bgp_evpn_effective_fq_rt_slu, &vpn->effective_fq_export_rts, fq_rt)
@@ -1066,6 +1091,9 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 
 		/* Set up extended community */
 		bgp_evpn_type1_evi_route_extcomm_build(es, vpn, &attr);
+		bgp_evpn_srv6_l2_attr(vpn, &attr, false);
+		if (vpn->srv6_l2)
+			((uint8_t *)&attr.label)[2] = 0x30; /* full SID; no transposition */
 
 		/* First, create (or fetch) route node within the VNI. */
 		dest = bgp_node_get(vpn->ip_table, (struct prefix *)p);
@@ -1089,6 +1117,13 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 
 		/* Set up extended community */
 		bgp_evpn_type1_es_route_extcomm_build(es_frag, &attr);
+		struct bgpevpn *native = native_es_fragment(es_frag);
+		if (native) {
+			/* RFC 9252 6.1.1 permits zero End.DT2M SID for local bias.
+			 * ESI argument filtering is not implemented by the dataplane. */
+			bgp_evpn_srv6_l2_attr(native, &attr, true);
+			memset(&bgp_attr_get_srv6_l3service(&attr)->sid, 0, 16);
+		}
 
 		/* First, create (or fetch) route node within the ES. */
 		/* NOTE: There is no RD here. */

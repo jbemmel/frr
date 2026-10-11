@@ -261,4 +261,7 @@ extern void bgp_evpn_srv6_notify(struct bgpevpn *vpn,
                                const struct prefix_evpn *p,
                                struct bgp_path_info *pi, bool add);
 
+/* Native full-SID attributes shared by MAC/IMET and Ethernet A-D routes. */
+void bgp_evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet);
+
 #endif /* _QUAGGA_BGP_EVPN_H */

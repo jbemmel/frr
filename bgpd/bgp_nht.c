@@ -30,6 +30,7 @@
 #include "bgpd/bgp_zebra.h"
 #include "bgpd/bgp_flowspec_util.h"
 #include "bgpd/bgp_evpn.h"
+#include "bgpd/bgp_evpn_mh.h"
 #include "bgpd/bgp_rd.h"
 #include "bgpd/bgp_mplsvpn.h"
 #include "bgpd/bgp_ecommunity.h"
@@ -1161,6 +1162,19 @@ static bool make_prefix(int afi, struct bgp_path_info *pi, struct prefix *p,
 		struct bgp_attr_srv6_l3service *srv6_l3service =
 			bgp_attr_get_srv6_l3service(pi->attr);
 
+		/* RFC 9252 6.1.1: an A-D per-ES route may carry a zero SID
+		 * for local bias. Track the PE next hop, not the unspecified SID.
+		 * Other route types and service encodings still track their SID. */
+		if (srv6_l3service && p_orig->family == AF_EVPN) {
+			const struct prefix_evpn *evp = (const struct prefix_evpn *)p_orig;
+			if (evp->prefix.route_type == BGP_EVPN_AD_ROUTE &&
+			    evp->prefix.ead_addr.eth_tag == BGP_EVPN_AD_ES_ETH_TAG &&
+			    srv6_l3service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE &&
+			    srv6_l3service->endpoint_behavior == 24 &&
+			    !srv6_l3service->transposition_len &&
+			    IN6_IS_ADDR_UNSPECIFIED(&srv6_l3service->sid))
+				srv6_l3service = NULL;
+		}
 		p->family = AF_INET6;
 		if (srv6_l3service) {
 			tmp_prefix.family = AF_INET6;

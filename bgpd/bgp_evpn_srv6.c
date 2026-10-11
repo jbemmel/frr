@@ -18,6 +18,7 @@
 #include "bgpd/bgp_attr_srv6.h"
 #include "bgpd/bgp_evpn.h"
 #include "bgpd/bgp_evpn_private.h"
+#include "bgpd/bgp_evpn_mh.h"
 #include "bgpd/bgp_route.h"
 #include "bgpd/bgp_table.h"
 
@@ -31,9 +32,40 @@ struct local_mac {
 	struct local_mac *next;
 	vni_t vni;
 	struct ethaddr mac;
+	esi_t esi;
+	uint32_t sw_if_index;
 };
 static struct local_mac *local_macs, *pending_withdraw;
 static struct event *withdraw_event;
+struct local_es {
+	struct local_es *next;
+	vni_t vni;
+	esi_t esi;
+	uint32_t sw_if_index;
+};
+static struct local_es *local_segments, *pending_segments;
+
+static bool segment_owned(esi_t *esi)
+{
+	for (struct local_es *entry = local_segments; entry; entry = entry->next)
+		if (!memcmp(&entry->esi, esi, sizeof(*esi)))
+			return true;
+	return false;
+}
+
+static void segment_withdraw(struct local_es *entry)
+{
+	struct bgp *bgp = bgp_get_evpn();
+	if (!bgp || !bgp_evpn_es_find(&entry->esi))
+		return;
+	bgp_evpn_local_es_evi_del(bgp, &entry->esi, entry->vni);
+	bool pending = false;
+	for (struct local_es *other = pending_segments; other; other = other->next)
+		if (!memcmp(&other->esi, &entry->esi, sizeof(entry->esi)))
+			pending = true;
+	if (!pending && !segment_owned(&entry->esi))
+		bgp_evpn_local_es_del(bgp, &entry->esi);
+}
 
 static void local_withdraw(struct local_mac *entry)
 {
@@ -58,6 +90,13 @@ static void withdraw_pending(struct event *event)
 		local_withdraw(entry);
 		XFREE(MTYPE_TMP, entry);
 	}
+	/* MAC withdrawals precede removal of their parent ES/EVI references. */
+	while (pending_segments) {
+		struct local_es *entry = pending_segments;
+		pending_segments = entry->next;
+		segment_withdraw(entry);
+		XFREE(MTYPE_TMP, entry);
+	}
 }
 
 static void agent_close(void)
@@ -76,7 +115,13 @@ static void agent_close(void)
 		entry->next = pending_withdraw;
 		pending_withdraw = entry;
 	}
-	if (pending_withdraw && !withdraw_event)
+	while (local_segments) {
+		struct local_es *entry = local_segments;
+		local_segments = entry->next;
+		entry->next = pending_segments;
+		pending_segments = entry;
+	}
+	if ((pending_withdraw || pending_segments) && !withdraw_event)
 		event_add_event(bm->master, withdraw_pending, NULL, 0, &withdraw_event);
 	if (output)
 		buffer_free(output);
@@ -191,6 +236,82 @@ static void snapshot_vni(struct hash_bucket *bucket, void *arg)
 	}
 }
 
+/* A down ES retains its association but owns no advertised local MACs. */
+static void segment_mac_withdraw(vni_t vni, esi_t *esi)
+{
+	struct local_mac **slot = &local_macs;
+	while (*slot) {
+		struct local_mac *entry = *slot;
+		if (entry->vni != vni || memcmp(&entry->esi, esi, sizeof(*esi))) {
+			slot = &entry->next;
+			continue;
+		}
+		*slot = entry->next;
+		local_withdraw(entry);
+		XFREE(MTYPE_TMP, entry);
+		if (client < 0)
+			return;
+	}
+}
+
+static bool segment_update(const struct evpn_srv6_msg *message)
+{
+	struct bgp *bgp = bgp_get_evpn();
+	vni_t vni = ntohl(message->vni);
+	struct bgpevpn *vpn = bgp ? bgp_evpn_lookup_vni(bgp, vni) : NULL;
+	esi_t esi;
+	struct ipaddr originator = {};
+	struct local_es **slot = &local_segments, *entry;
+	uint32_t sw_if_index = ntohl(message->sw_if_index);
+	memcpy(&esi, message->esi, sizeof(esi));
+	if (message->type != BGP_EVPN_ES_ROUTE ||
+	    !memcmp(&esi, zero_esi, sizeof(esi)) ||
+	    (message->flags & ~EVPN_SRV6_ES_OPER_UP))
+		return false;
+	if (!vpn || !vpn->srv6_l2 || !is_vni_live(vpn))
+		return true;
+	while (*slot && ((*slot)->vni != vni || memcmp(&(*slot)->esi, &esi, sizeof(esi))))
+		slot = &(*slot)->next;
+	entry = *slot;
+	if (entry && entry->sw_if_index != sw_if_index)
+		return false; /* One attachment per ESI/VNI on this client. */
+	if (!message->add || !(message->flags & EVPN_SRV6_ES_OPER_UP)) {
+		segment_mac_withdraw(vni, &esi);
+		if (client < 0)
+			return false;
+	}
+	if (!message->add) {
+		if (entry) {
+			*slot = entry->next;
+			segment_withdraw(entry);
+			XFREE(MTYPE_TMP, entry);
+		}
+		return client >= 0;
+	}
+	struct in6_addr source;
+	memcpy(&source, message->sid, sizeof(source));
+	if (IN6_IS_ADDR_UNSPECIFIED(&source) || IN6_IS_ADDR_MULTICAST(&source) ||
+	    !IPV6_ADDR_SAME(&source, &vpn->originator_ip.ipaddr_v6))
+		return false;
+	struct bgp_evpn_es *existing = bgp_evpn_es_find(&esi);
+	if (!segment_owned(&esi) && existing && CHECK_FLAG(existing->flags, BGP_EVPNES_LOCAL))
+		return false; /* Never take ownership from zebra's Linux dataplane. */
+	if (!entry) {
+		entry = XCALLOC(MTYPE_TMP, sizeof(*entry));
+		entry->vni = vni;
+		entry->esi = esi;
+		entry->sw_if_index = sw_if_index;
+		*slot = entry;
+	}
+	ipaddr_set_v6(&originator, &source);
+	if (bgp_evpn_local_es_add(bgp, &esi, originator,
+				  !!(message->flags & EVPN_SRV6_ES_OPER_UP),
+				  ntohs(message->df_pref), false) ||
+	    bgp_evpn_local_es_evi_add(bgp, &esi, vni))
+		return false;
+	return client >= 0;
+}
+
 static bool local_update(const struct evpn_srv6_msg *message)
 {
 	struct bgp *bgp = bgp_get_evpn();
@@ -199,17 +320,32 @@ static bool local_update(const struct evpn_srv6_msg *message)
 	struct local_mac **slot, *entry;
 	struct ethaddr mac;
 	struct ipaddr ip = {};
+	esi_t esi;
 
 	if (ntohl(message->magic) != EVPN_SRV6_MAGIC ||
 	    message->version != EVPN_SRV6_VERSION ||
-	    message->op != EVPN_SRV6_LOCAL ||
-	    message->type != BGP_EVPN_MAC_IP_ROUTE || message->add > 1 ||
+	    message->add > 1)
+		return false;
+	if (message->op == EVPN_SRV6_ES)
+		return segment_update(message);
+	if (message->op != EVPN_SRV6_LOCAL || message->flags ||
+	    message->type != BGP_EVPN_MAC_IP_ROUTE ||
 	    (message->key[0] & 1) ||
 	    !memcmp(message->key, "\0\0\0\0\0\0", ETH_ALEN))
 		return false;
 	if (!vpn || !vpn->srv6_l2 || !is_vni_live(vpn))
 		return true; /* VNI configuration can race local events. SYNC replays. */
 	memcpy(&mac, message->key, ETH_ALEN);
+	memcpy(&esi, message->esi, sizeof(esi));
+	if (message->add && memcmp(&esi, zero_esi, sizeof(esi))) {
+		struct local_es *segment;
+		for (segment = local_segments; segment; segment = segment->next)
+			if (segment->vni == vni && !memcmp(&segment->esi, &esi, sizeof(esi)))
+				break;
+		struct bgp_evpn_es *es = bgp_evpn_es_find(&esi);
+		if (!segment || !es || !bgp_evpn_local_es_is_active(es))
+			return false; /* ES registration/up precedes its MAC adds. */
+	}
 	/* Register ownership before invoking route callbacks: a slow-client
 	 * disconnect may withdraw and free this list during the add. */
 	slot = &local_macs;
@@ -223,9 +359,12 @@ static bool local_update(const struct evpn_srv6_msg *message)
 			entry->mac = mac;
 			*slot = entry;
 		}
-		if (bgp_evpn_local_macip_add(bgp, vni, &mac, &ip, 0, 0, NULL))
+		entry->esi = esi;
+		entry->sw_if_index = ntohl(message->sw_if_index);
+		if (bgp_evpn_local_macip_add(bgp, vni, &mac, &ip, 0, 0, &esi))
 			return false;
-	} else if (entry) {
+	} else if (entry && entry->sw_if_index == ntohl(message->sw_if_index) &&
+		   !memcmp(&entry->esi, &esi, sizeof(esi))) {
 		*slot = entry->next;
 		local_withdraw(entry);
 		XFREE(MTYPE_TMP, entry);
