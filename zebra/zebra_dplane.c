@@ -6103,7 +6103,7 @@ void dplane_mac_init(struct zebra_dplane_ctx *ctx, const struct interface *ifp,
 	if (!vni) {
 		struct zebra_evpn *zevpn = zebra_evpn_map_vlan((struct interface *)ifp,
 							       (struct interface *)br_ifp, vid);
-		if (zevpn && zebra_evpn_srv6_native(zevpn->vni))
+		if (zevpn)
 			vni = zevpn->vni;
 	}
 	ctx->zd_evpn_srv6 = zebra_evpn_srv6_native(vni);

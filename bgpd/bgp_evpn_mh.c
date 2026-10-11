@@ -42,6 +42,9 @@
 #include "bgpd/bgp_mpath.h"
 #include "bgpd/bgp_trace.h"
 
+/* RFC 9252: Implicit NULL, no Arg.FE2. */
+#define BGP_EVPN_SRV6_IMPLICIT_NULL_LABEL 0x30
+
 static void bgp_evpn_mh_get_vtep_ip(const struct attr *attr, struct ipaddr *vtep_ip)
 {
 	uint8_t nhfamily;
@@ -503,7 +506,9 @@ int bgp_evpn_mh_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 			bgp_path_info_extra_get(tmp_pi);
 			bgp_labels.num_labels = 1;
 			if (vpn)
-				vni2label(vpn->srv6_l2 ? 0x30 : vpn->vni,
+				vni2label(vpn->srv6_l2
+						 ? BGP_EVPN_SRV6_IMPLICIT_NULL_LABEL
+						 : vpn->vni,
 					  &bgp_labels.label[0]);
 			if (!bgp_path_info_labels_same(tmp_pi,
 						       &bgp_labels.label[0],
@@ -978,7 +983,7 @@ static struct bgpevpn *native_es_fragment(struct bgp_evpn_es_frag *fragment)
 
 /* Extended communities associated with EAD-per-ES */
 static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_frag,
-						  struct attr *attr)
+						  struct attr *attr, bool native)
 {
 	struct ecommunity_val eval_tmp;
 	bgp_encap_types tnl_type;
@@ -991,7 +996,7 @@ static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_fr
 	ecom = ecommunity_new();
 
 	/* Encap. This is the first community; the ones below extend it. */
-	if (!native_es_fragment(es_frag)) {
+	if (!native) {
 		tnl_type = BGP_ENCAP_TYPE_VXLAN;
 		encode_encap_extcomm(tnl_type, &eval_tmp);
 		ecommunity_append_val_unchecked(ecom, &eval_tmp);
@@ -999,8 +1004,8 @@ static void bgp_evpn_type1_es_route_extcomm_build(struct bgp_evpn_es_frag *es_fr
 
 	/* ESI label */
 	encode_esi_label_extcomm(&eval_tmp, false /*single_active*/);
-	if (native_es_fragment(es_frag))
-		eval_tmp.val[7] = 0x30; /* RFC 9252: Implicit NULL, no Arg.FE2. */
+	if (native)
+		eval_tmp.val[7] = BGP_EVPN_SRV6_IMPLICIT_NULL_LABEL;
 	ecommunity_append_val_unchecked(ecom, &eval_tmp);
 
 	/* Add export RTs for all L2-VNIs associated with this ES */
@@ -1093,7 +1098,8 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 		bgp_evpn_type1_evi_route_extcomm_build(es, vpn, &attr);
 		bgp_evpn_srv6_l2_attr(vpn, &attr, false);
 		if (vpn->srv6_l2)
-			((uint8_t *)&attr.label)[2] = 0x30; /* full SID; no transposition */
+			/* Full SID; no transposition. */
+			((uint8_t *)&attr.label)[2] = BGP_EVPN_SRV6_IMPLICIT_NULL_LABEL;
 
 		/* First, create (or fetch) route node within the VNI. */
 		dest = bgp_node_get(vpn->ip_table, (struct prefix *)p);
@@ -1116,8 +1122,8 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 		assert(es_frag);
 
 		/* Set up extended community */
-		bgp_evpn_type1_es_route_extcomm_build(es_frag, &attr);
 		struct bgpevpn *native = native_es_fragment(es_frag);
+		bgp_evpn_type1_es_route_extcomm_build(es_frag, &attr, native != NULL);
 		if (native) {
 			/* RFC 9252 6.1.1 permits zero End.DT2M SID for local bias.
 			 * ESI argument filtering is not implemented by the dataplane. */
