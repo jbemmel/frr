@@ -49,6 +49,7 @@
 #include "zebra/zebra_opaque.h"
 #include "zebra/zebra_srte.h"
 #include "zebra/zebra_srv6.h"
+#include "zebra/zebra_evpn_srv6.h"
 #include "zebra/zebra_srv6_vty.h"
 
 #define ZEBRA_PTM_SUPPORT
@@ -573,6 +574,7 @@ int main(int argc, char **argv)
 
 	/* Config handler Init */
 	zebra_evpn_init();
+	zebra_evpn_srv6_init();
 
 	/* Error init */
 	zebra_error_init();

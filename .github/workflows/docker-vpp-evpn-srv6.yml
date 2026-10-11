@@ -1,0 +1,113 @@
+name: Publish FRR VPP EVPN SRv6 image
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.yang'
+      - '**/*.sh'
+      - '**/*.l'
+      - '**/*.y'
+      - '**/*.proto'
+      - '**/*.py'
+      - '**/*.am'
+      - '**/*.in'
+      - 'm4/**'
+      - 'configure.ac'
+      - '.dockerignore'
+      - 'docker/vpp-evpn-srv6/**'
+      - '.github/workflows/docker-vpp-evpn-srv6.yml'
+  workflow_dispatch:
+    inputs:
+      vpp_ref:
+        description: VPP branch or tag
+        default: feature/linux-cp-srv6-route-sync
+        type: string
+      evpn_ref:
+        description: VPP EVPN plugin branch or tag (must match FRR control protocol)
+        default: feature/ipv6-dual-stack
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: frr-vpp-evpn-srv6-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout triggering FRR commit
+        uses: actions/checkout@v7
+
+      - name: Resolve image name and dependency commits
+        id: sources
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VPP_REF: ${{ inputs.vpp_ref || 'feature/linux-cp-srv6-route-sync' }}
+          EVPN_REF: ${{ inputs.evpn_ref || 'feature/ipv6-dual-stack' }}
+        run: |
+          resolve_commit() {
+            local repo="$1" ref="$2" commit
+            commit=$(git ls-remote --heads "$repo" "refs/heads/$ref" | awk 'NR == 1 {print $1}')
+            if [ -z "$commit" ]; then
+              commit=$(git ls-remote --tags "$repo" "refs/tags/$ref" "refs/tags/$ref^{}" |
+                awk '/\^\{\}$/ {peeled=$1} !/\^\{\}$/ {tag=$1} END {print peeled ? peeled : tag}')
+            fi
+            if [[ ! "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "Cannot resolve $repo ref $ref" >&2
+              return 1
+            fi
+            printf '%s\n' "$commit"
+          }
+          echo "image=ghcr.io/${OWNER,,}/frr-vpp-evpn-srv6" >> "$GITHUB_OUTPUT"
+          vpp_commit=$(resolve_commit https://github.com/jbemmel/vpp.git "$VPP_REF")
+          evpn_commit=$(resolve_commit https://github.com/exergy-connect/vpp-evpn-plugin.git "$EVPN_REF")
+          echo "vpp_commit=$vpp_commit" >> "$GITHUB_OUTPUT"
+          echo "evpn_commit=$evpn_commit" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ steps.sources.outputs.image }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=sha,prefix=sha-,format=long
+
+      - name: Build and publish
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/vpp-evpn-srv6/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            FRR_COMMIT=${{ github.sha }}
+            VPP_REF=${{ inputs.vpp_ref || 'feature/linux-cp-srv6-route-sync' }}
+            EVPN_REF=${{ inputs.evpn_ref || 'feature/ipv6-dual-stack' }}
+            VPP_COMMIT=${{ steps.sources.outputs.vpp_commit }}
+            EVPN_COMMIT=${{ steps.sources.outputs.evpn_commit }}
+          cache-from: type=gha,scope=frr-vpp-evpn-srv6
+          cache-to: type=gha,scope=frr-vpp-evpn-srv6,mode=max
