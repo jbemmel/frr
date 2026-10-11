@@ -1466,7 +1466,7 @@ static void build_evpn_route_extcomm(struct bgpevpn *vpn, struct attr *attr, int
 
 /* Full SID encoding (no label transposition), RFC 9252 sections 6.2/6.3.
  * The VNI remains the MAC-VRF identifier; no VXLAN encapsulation is used. */
-static void evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
+void bgp_evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
 {
 	struct bgp_attr_srv6_l3service *service;
 
@@ -2660,7 +2660,7 @@ static int update_evpn_route(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
-	evpn_srv6_l2_attr(vpn, &attr, p->prefix.route_type == BGP_EVPN_IMET_ROUTE);
+	bgp_evpn_srv6_l2_attr(vpn, &attr, p->prefix.route_type == BGP_EVPN_IMET_ROUTE);
 
 	/* First, create (or fetch) route node within the VNI.
 	 * NOTE: There is no RD here.
@@ -2950,7 +2950,7 @@ void bgp_evpn_update_type2_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
-	evpn_srv6_l2_attr(vpn, &attr, false);
+	bgp_evpn_srv6_l2_attr(vpn, &attr, false);
 	seq = mac_mobility_seqnum(local_pi->attr);
 
 	if (bgp_debug_zebra(NULL)) {
