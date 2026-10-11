@@ -26,6 +26,8 @@
 #include "zebra/debug.h"
 #include "zebra/zebra_pbr.h"
 #include "zebra/zebra_l2.h"
+#include "zebra/zebra_evpn.h"
+#include "zebra/zebra_evpn_srv6.h"
 #include "zebra/zebra_neigh.h"
 #include "zebra/zebra_tc.h"
 #include "zebra/zebra_trace.h"
@@ -49,7 +51,7 @@ DEFINE_MTYPE(ZEBRA, VLAN_CHANGE_ARR, "Vlan Change Array");
  * are made. The minor version (at least) should be updated when new APIs
  * are introduced.
  */
-static uint32_t zdplane_version = MAKE_FRRVERSION(4, 1, 0);
+static uint32_t zdplane_version = MAKE_FRRVERSION(4, 2, 0);
 
 /* Control for collection of extra interface info with route updates; a plugin
  * can enable the extra info via a dplane api.
@@ -505,6 +507,9 @@ struct dplane_vlan_info {
  * dataplane layer (and pthread).
  */
 struct zebra_dplane_ctx {
+	bool zd_evpn_srv6;
+	uint32_t zd_evpn_srv6_epoch;
+	struct in6_addr zd_evpn_srv6_sid;
 
 	/* Operation code */
 	enum dplane_op_e zd_op;
@@ -833,9 +838,21 @@ uint32_t zebra_dplane_get_work_limit(void)
 	return zdplane_info.dg_updates_per_cycle;
 }
 
-/*
- * Allocate a dataplane update context
- */
+/* SRv6 encapsulation metadata copied on the main thread. */
+bool dplane_ctx_is_evpn_srv6(const struct zebra_dplane_ctx *ctx)
+{
+	return ctx->zd_evpn_srv6;
+}
+uint32_t dplane_ctx_get_evpn_srv6_epoch(const struct zebra_dplane_ctx *ctx)
+{
+	return ctx->zd_evpn_srv6_epoch;
+}
+const struct in6_addr *dplane_ctx_get_evpn_srv6_sid(const struct zebra_dplane_ctx *ctx)
+{
+	return &ctx->zd_evpn_srv6_sid;
+}
+
+/* Allocate a dataplane update context. */
 struct zebra_dplane_ctx *dplane_ctx_alloc(void)
 {
 	struct zebra_dplane_ctx *p;
@@ -5681,6 +5698,8 @@ static enum zebra_dplane_result fdb_nh_update_common(enum dplane_op_e op, uint32
 	/* ctx is zero-initialized by dplane_ctx_alloc()'s XCALLOC. */
 	ctx = dplane_ctx_alloc();
 	ctx->zd_op = op;
+	ctx->zd_evpn_srv6 = zebra_evpn_srv6_active();
+	ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
 	ctx->zd_status = ZEBRA_DPLANE_REQUEST_SUCCESS;
 
 	/* EVPN-MH FDB nexthops live in the EVPN vrf's namespace. */
@@ -5966,6 +5985,8 @@ enum zebra_dplane_result dplane_br_port_update(const struct interface *ifp, bool
 	/* Init the br-port-specific data area */
 	memset(&ctx->u.br_port, 0, sizeof(ctx->u.br_port));
 
+	ctx->zd_evpn_srv6 = zebra_evpn_srv6_native_if(ifp->ifindex);
+	ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
 	ctx->u.br_port.flags = flags;
 	ctx->u.br_port.backup_nhg_id = backup_nhg_id;
 	ctx->u.br_port.sph_filter_cnt = sph_filter_cnt;
@@ -6386,6 +6407,20 @@ void dplane_mac_init(struct zebra_dplane_ctx *ctx, const struct interface *ifp,
 	ctx->u.macinfo.is_sticky = sticky;
 	ctx->u.macinfo.nhg_id = nhg_id;
 	ctx->u.macinfo.update_flags = update_flags;
+	if (!vni) {
+		struct zebra_evpn *zevpn = zebra_evpn_map_vlan((struct interface *)ifp,
+							       (struct interface *)br_ifp, vid);
+		if (zevpn && zebra_evpn_srv6_native(zevpn->vni))
+			vni = zevpn->vni;
+	}
+	ctx->zd_evpn_srv6 = zebra_evpn_srv6_native(vni);
+	ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
+	if (ctx->zd_evpn_srv6) {
+		ctx->u.macinfo.vni = vni;
+		const struct in6_addr *sid = zebra_evpn_srv6_sid(vni, vtep_ip, 2);
+		if (sid)
+			ctx->zd_evpn_srv6_sid = *sid;
+	}
 }
 
 /*
@@ -6675,6 +6710,13 @@ neigh_update_internal(enum dplane_op_e op, const struct interface *ifp,
 
 	ctx->u.neigh.flags = flags;
 	ctx->u.neigh.vni = vni;
+	if (op == DPLANE_OP_VTEP_ADD || op == DPLANE_OP_VTEP_DELETE) {
+		ctx->zd_evpn_srv6 = zebra_evpn_srv6_native(vni);
+		ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
+		const struct in6_addr *sid = zebra_evpn_srv6_sid(vni, ip, 3);
+		if (sid)
+			ctx->zd_evpn_srv6_sid = *sid;
+	}
 	ctx->u.neigh.state = state;
 	ctx->u.neigh.update_flags = update_flags;
 

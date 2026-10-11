@@ -129,7 +129,6 @@ noinst_HEADERS += \
 	bgpd/bgp_encap_types.h \
 	bgpd/bgp_errors.h \
 	bgpd/bgp_evpn.h \
-	bgpd/bgp_evpn_srv6_wire.h \
 	bgpd/bgp_evpn_mh.h \
 	bgpd/bgp_evpn_private.h \
 	bgpd/bgp_evpn_vty.h \

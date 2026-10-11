@@ -147,7 +147,7 @@ RUN ./bootstrap.sh && ./configure --prefix=/usr --sysconfdir=/etc \
     && printf '%s\n' "$FRR_COMMIT" > /runtime/usr/share/vpp/evpn/frr.commit
 COPY --from=evpn-plugin /runtime/ /runtime/
 COPY --from=evpn-plugin /src/evpn/evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
-RUN cmp /src/frr/bgpd/bgp_evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
+RUN cmp /src/frr/zebra/zebra_evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
 
 FROM vpp-base
 ARG FRR_COMMIT=working-tree

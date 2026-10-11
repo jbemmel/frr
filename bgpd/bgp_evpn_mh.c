@@ -4086,6 +4086,7 @@ enum zclient_send_status bgp_evpn_remote_es_evi_add(struct bgp *bgp,
 		/* local EAD-ES need not be sent back to zebra */
 		return ret;
 
+	bgp_evpn_srv6_notify(vpn, p, pi, true);
 	bgp_evpn_mh_fill_vtep_ip_from_pi(pi, &vtep_ip);
 
 	if (BGP_DEBUG(evpn_mh, EVPN_MH_ES))
