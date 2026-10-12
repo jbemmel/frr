@@ -16,6 +16,7 @@
 #include "zebra/zserv.h"
 #include "zebra/zebra_router.h"
 #include "zebra/zebra_srv6.h"
+#include "zebra/zebra_evpn_srv6.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/ge_netlink.h"
 #include "zebra/interface.h"
@@ -224,6 +225,7 @@ static void zebra_srv6_sid_entry_del_by_locator(struct zebra_srv6_sid *sid,
 	frr_each_safe (zebra_srv6_sid_entry_list, &sid->entries, entry)
 		if (entry->locator == locator) {
 			zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+			zebra_evpn_srv6_local_sid(&sid->ctx->ctx, &entry->sid_value, false);
 			zebra_srv6_sid_entry_free(entry);
 		}
 
@@ -704,6 +706,7 @@ void zebra_srv6_sid_free(struct zebra_srv6_sid *sid)
 
 	frr_each_safe (zebra_srv6_sid_entry_list, &sid->entries, entry) {
 		zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+		zebra_evpn_srv6_local_sid(&sid->ctx->ctx, &entry->sid_value, false);
 		zebra_srv6_sid_entry_free(entry);
 	}
 	zebra_srv6_sid_entry_list_fini(&sid->entries);
@@ -833,6 +836,7 @@ void zebra_srv6_sid_client_del(struct zebra_srv6_sid *sid, struct zebra_srv6_sid
 	XFREE(MTYPE_ZEBRA_SRV6_SID_ENTRY_INFO, sclient);
 	if (zebra_srv6_sid_client_list_count(&entry->clients_list) == 0) {
 		zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+		zebra_evpn_srv6_local_sid(&sid->ctx->ctx, &entry->sid_value, false);
 		zebra_srv6_sid_entry_free(entry);
 	}
 }
@@ -855,6 +859,7 @@ void zebra_srv6_sid_client_del_all(struct zebra_srv6_sid *sid, struct zserv *cli
 		XFREE(MTYPE_ZEBRA_SRV6_SID_ENTRY_INFO, zclient);
 		if (zebra_srv6_sid_client_list_count(&entry->clients_list) == 0) {
 			zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+			zebra_evpn_srv6_local_sid(&sid->ctx->ctx, &entry->sid_value, false);
 			zebra_srv6_sid_entry_free(entry);
 		}
 	}
@@ -881,6 +886,7 @@ static void zebra_srv6_sid_entry_delete_all(struct zebra_srv6_sid *sid)
 
 	frr_each_safe (zebra_srv6_sid_entry_list, &sid->entries, entry) {
 		zebra_srv6_sid_entry_list_del(&sid->entries, entry);
+		zebra_evpn_srv6_local_sid(&sid->ctx->ctx, &entry->sid_value, false);
 		zebra_srv6_sid_entry_free(entry);
 	}
 }
@@ -2083,7 +2089,7 @@ int get_srv6_sid(struct zebra_srv6_sid **sid, struct srv6_sid_ctx *ctx, struct i
 		 * Explicit SID allocation: allocate a specific SID value
 		 */
 
-		if (locator_name) {
+		if (locator_name && locator_name[0]) {
 			locator = zebra_srv6_locator_lookup(locator_name);
 			if (!locator) {
 				flog_err(EC_ZEBRA_SRV6_LOCATOR_LOOKUP_FAIL,
@@ -2683,6 +2689,8 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 				      locator_name, ZAPI_SRV6_SID_FAIL_ALLOC);
 	} else if (ret == 0) {
 		assert(*sid);
+		if (!locator)
+			locator = zebra_srv6_sid_entry_list_first(&(*sid)->entries)->locator;
 		if (IS_ZEBRA_DEBUG_SRV6)
 			zlog_debug("%s: got existing SRv6 SID for ctx %s: sid_value=%pI6 (func=%u) (proto=%u, instance=%u, sessionId=%u), notify client",
 				   __func__, srv6_sid_ctx2str(buf, sizeof(buf), ctx), sid_value,
@@ -2707,6 +2715,8 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 		zebra_srv6_sid_clients_notify_single(*sid, locator, client, is_localonly,
 						     ZAPI_SRV6_SID_ALLOCATED);
 	} else {
+		if (!locator)
+			locator = zebra_srv6_sid_entry_list_first(&(*sid)->entries)->locator;
 		if (IS_ZEBRA_DEBUG_SRV6)
 			zlog_debug("%s: got new SRv6 SID for ctx %s: sid_value=%pI6 (func=%u) (proto=%u, instance=%u, sessionId=%u), notifying all clients",
 				   __func__, srv6_sid_ctx2str(buf, sizeof(buf), ctx), sid_value,
@@ -2732,6 +2742,8 @@ static int srv6_manager_get_sid_internal(struct zebra_srv6_sid **sid, struct zse
 						  ZAPI_SRV6_SID_ALLOCATED);
 	}
 
+	if (ret >= 0)
+		zebra_evpn_srv6_local_sid_replay(ctx->vni);
 	return ret;
 }
 
@@ -2793,6 +2805,18 @@ static int srv6_manager_release_sid_internal(struct zserv *client, struct srv6_s
 
 	frrtrace(2, frr_zebra, srv6_manager_release_sid_internal,
 		 srv6_sid_ctx2str(buf, sizeof(buf), ctx), locator_name);
+
+	if ((!locator_name || !locator_name[0]) && ctx->vni &&
+	    (ctx->behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2U ||
+	     ctx->behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2M)) {
+		struct listnode *node;
+		for (ALL_LIST_ELEMENTS_RO(zebra_srv6_get_default()->sid_blocks, node, block))
+			frr_each_safe (zebra_srv6_sid_ctx_list, &block->sids, zctx)
+				if (!memcmp(&zctx->ctx, ctx, sizeof(*ctx)))
+					zebra_srv6_sid_client_del_all(zctx->sid, client);
+		zsend_srv6_sid_notify(client, ctx, &sid_value, 0, 0, "", ZAPI_SRV6_SID_RELEASED);
+		return 0;
+	}
 
 	if (!locator_name || locator_name[0] == '\0') {
 		flog_err(EC_ZEBRA_SRV6_LOCATOR_LOOKUP_FAIL,

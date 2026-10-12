@@ -1478,7 +1478,8 @@ void bgp_evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
 	service->endpoint_behavior = imet ? 24 : 23; /* End.DT2M / End.DT2U */
 	service->loc_block_len = 32;
 	service->loc_node_len = 16;
-	service->func_len = 80;
+	service->func_len = 32;
+	service->arg_len = 48;
 	bgp_attr_set_srv6_l3service(attr, service);
 	bgp_attr_set(attr, BGP_ATTR_PREFIX_SID);
 	memset(&attr->label, 0, sizeof(attr->label));
@@ -2723,7 +2724,7 @@ static int update_evpn_route(struct bgp *bgp, struct bgpevpn *vpn,
 	 * from there. Note that this table is a 2-level tree (RD-level +
 	 * Prefix-level) similar to L3VPN routes.
 	 */
-	if (route_change) {
+	if (route_change && bgp_evpn_srv6_sids_ready(vpn)) {
 		struct bgp_path_info *global_pi;
 
 		dest = bgp_evpn_global_node_get(bgp->rib[afi][safi], afi, safi,
@@ -3008,7 +3009,7 @@ void bgp_evpn_update_type2_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 	/* unlock pi */
 	bgp_path_info_unlock(pi);
 
-	if (route_change) {
+	if (route_change && bgp_evpn_srv6_sids_ready(vpn)) {
 		/* Update route in global routing table. */
 		global_dest = bgp_evpn_global_node_get(
 			bgp->rib[afi][safi], afi, safi, &evp, &vpn->prd, NULL);
@@ -5263,6 +5264,9 @@ static void update_advertise_vni_routes(struct bgp *bgp, struct bgpevpn *vpn)
 	struct attr *attr;
 	afi_t afi = AFI_L2VPN;
 	safi_t safi = SAFI_EVPN;
+
+	if (!bgp_evpn_srv6_sids_ready(vpn))
+		return;
 
 	/* Locate type-3 route for VNI in the per-VNI table and use its
 	 * attributes to create and advertise the type-3 route for this VNI
@@ -7782,6 +7786,7 @@ struct bgpevpn *bgp_evpn_new(struct bgp *bgp, vni_t vni, struct ipaddr *originat
  */
 void bgp_evpn_free(struct bgp *bgp, struct bgpevpn *vpn)
 {
+	bgp_evpn_srv6_local_sids(vpn, false);
 	bgp_evpn_remote_ip_hash_destroy(vpn);
 	bgp_evpn_vni_es_cleanup(vpn);
 	bgpevpn_unlink_from_l3vni(vpn);

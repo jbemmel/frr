@@ -3308,6 +3308,7 @@ static void bgp_zebra_connected(struct zclient *zclient)
 	safi_t safi;
 
 	zclient_num_connects++; /* increment even if not responding */
+	bgp_evpn_srv6_reconnect();
 
 	/* Send the client registration */
 	bfd_client_sendmsg(zclient, ZEBRA_BFD_CLIENT_REGISTER, VRF_DEFAULT);
@@ -3800,6 +3801,35 @@ static int bgp_zebra_srv6_sid_notify(ZAPI_CALLBACK_ARGS)
 	bool found = false;
 	char loc_name[SRV6_LOCNAME_SIZE];
 
+	if (!zapi_srv6_sid_notify_decode(zclient->ibuf, &ctx, &sid_addr, &sid_func,
+				       &sid_wide_func, &note, loc_name, sizeof(loc_name)))
+		return -1;
+	if (ctx.behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2U ||
+	    ctx.behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2M) {
+		struct bgp *evpn = bgp_get_evpn();
+		struct bgpevpn *vpn = evpn ? bgp_evpn_lookup_vni(evpn, ctx.vni) : NULL;
+		if (!vpn || !vpn->srv6_l2)
+			return 0;
+		int mode = ctx.behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2M;
+		struct in6_addr *expected = mode ? &vpn->srv6_dt2m_sid : &vpn->srv6_dt2u_sid;
+		/* Ignore responses for a configuration replaced while the request was in flight. */
+		if (!IPV6_ADDR_SAME(&ctx.nh6, &vpn->originator_ip.ipaddr_v6) ||
+		    (note != ZAPI_SRV6_SID_RELEASED && !IPV6_ADDR_SAME(expected, &sid_addr)))
+			return 0;
+		if (note == ZAPI_SRV6_SID_ALLOCATED) {
+			strlcpy(vpn->srv6_l2_locator[mode], loc_name, SRV6_LOCNAME_SIZE);
+			if (bgp_evpn_srv6_sids_ready(vpn) && is_vni_live(vpn)) {
+				update_routes_for_vni(evpn, vpn);
+				bgp_evpn_handle_rd_change(evpn, vpn, 0);
+			}
+		} else if (note != ZAPI_SRV6_SID_RELEASED) {
+			vpn->srv6_l2_locator[mode][0] = '\0';
+			bgp_evpn_handle_rd_change(evpn, vpn, 1);
+			zlog_err("EVPN VNI %u: Zebra rejected/revoked %s SID %pI6", ctx.vni,
+				 seg6local_action2str(ctx.behavior), &sid_addr);
+		}
+		return 0;
+	}
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp_srv6_locator_is_configured(bgp))
 			continue;
@@ -3817,12 +3847,6 @@ static int bgp_zebra_srv6_sid_notify(ZAPI_CALLBACK_ARGS)
 		return -1;
 	}
 
-	/* Decode the received notification message */
-	if (!zapi_srv6_sid_notify_decode(zclient->ibuf, &ctx, &sid_addr, &sid_func, &sid_wide_func,
-					 &note, loc_name, sizeof(loc_name))) {
-		zlog_err("%s : error in msg decode", __func__);
-		return -1;
-	}
 
 	if (BGP_DEBUG(zebra, ZEBRA))
 		zlog_debug("%s: received SRv6 SID notify: ctx %s sid_value %pI6 %s, locator %s",
@@ -4281,6 +4305,7 @@ static int bgp_zebra_process_srv6_locator_add(ZAPI_CALLBACK_ARGS)
 		return -1;
 
 	bgp_ls_originate_srv6_locator_prefix(bgp_get_default(), &loc);
+	bgp_evpn_srv6_locator_change(&loc, true);
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp_srv6_locator_is_configured(bgp))
@@ -4457,6 +4482,7 @@ static int bgp_zebra_process_srv6_locator_delete(ZAPI_CALLBACK_ARGS)
 		return -1;
 
 	bgp_ls_withdraw_srv6_locator_prefix(bgp_get_default(), &loc);
+	bgp_evpn_srv6_locator_change(&loc, false);
 
 	for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, bgp)) {
 		if (!bgp->srv6_locator)

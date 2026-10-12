@@ -19,6 +19,7 @@
 #include "zebra/zebra_vxlan.h"
 #include "zebra/zebra_evpn_srv6.h"
 #include "zebra/zebra_evpn_srv6_wire.h"
+#include "zebra/zebra_srv6.h"
 
 static int listener = -1, client_fd = -1, notify_fd = -1;
 static struct event *accept_event, *read_event, *write_event, *notify_event;
@@ -89,6 +90,37 @@ const struct in6_addr *zebra_evpn_srv6_sid(vni_t vni, const struct ipaddr *peer,
 		if (e->vni == vni && e->mode == mode && !memcmp(&e->peer, &peer->ipaddr_v6, 16))
 			return &e->sid;
 	return NULL;
+}
+void zebra_evpn_srv6_local_sid(const struct srv6_sid_ctx *ctx,
+                              const struct in6_addr *sid, bool add)
+{
+	if (!ctx->vni || !zebra_evpn_srv6_native(ctx->vni) ||
+	    (ctx->behavior != ZEBRA_SEG6_LOCAL_ACTION_END_DT2U &&
+	     ctx->behavior != ZEBRA_SEG6_LOCAL_ACTION_END_DT2M))
+		return;
+	struct evpn_srv6_msg m = {
+		.magic = htonl(EVPN_SRV6_MAGIC), .version = EVPN_SRV6_VERSION,
+		.op = EVPN_SRV6_LOCAL_SID, .add = add, .vni = htonl(ctx->vni),
+		.type = ctx->behavior == ZEBRA_SEG6_LOCAL_ACTION_END_DT2U ? 2 : 3,
+	};
+	memcpy(m.key, &ctx->nh6, 16);
+	memcpy(m.sid, sid, 16);
+	agent_send(&m);
+}
+void zebra_evpn_srv6_local_sid_replay(vni_t vni)
+{
+	struct zebra_srv6 *srv6 = zebra_srv6_get_default();
+	struct listnode *node;
+	struct zebra_srv6_sid_block *block;
+	struct zebra_srv6_sid_ctx *ctx;
+	struct zebra_srv6_sid_entry *entry;
+	if (!vni || !zebra_evpn_srv6_native(vni))
+		return;
+	for (ALL_LIST_ELEMENTS_RO(srv6->sid_blocks, node, block))
+		frr_each (zebra_srv6_sid_ctx_list, &block->sids, ctx)
+			if (ctx->ctx.vni == vni)
+				frr_each (zebra_srv6_sid_entry_list, &ctx->sid->entries, entry)
+					zebra_evpn_srv6_local_sid(&ctx->ctx, &entry->sid_value, true);
 }
 static void owned_delete(struct owned *o)
 {
@@ -248,6 +280,7 @@ static void sync_mac_resync(struct hash_bucket *bucket, void *arg)
 static void resync(struct zebra_evpn *zevpn)
 {
 	vni_t vni = zevpn->vni;
+	zebra_evpn_srv6_local_sid_replay(vni);
 	for (struct sid_entry *e = sids; e; e = e->next)
 		if (e->vni == vni)
 			send_sid(e);

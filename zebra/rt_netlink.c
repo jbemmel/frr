@@ -1987,6 +1987,10 @@ static bool _netlink_nexthop_encode_seg6local_info(const struct nexthop *nexthop
 	ctx = &nexthop->nh_srv6->seg6local_ctx;
 
 	switch (nexthop->nh_srv6->seg6local_action) {
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		/* Ethernet behaviors require a native provider, not Linux seg6_local. */
+		return false;
 	case ZEBRA_SEG6_LOCAL_ACTION_END:
 		if (!nl_attr_put32(nlmsg, buflen, SEG6_LOCAL_ACTION, SEG6_LOCAL_ACTION_END))
 			return false;
