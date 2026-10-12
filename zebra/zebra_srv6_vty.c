@@ -282,6 +282,10 @@ static const char *show_srv6_sid_seg6_action(enum seg6local_action_t behavior)
 		return "uDT6";
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DT4:
 		return "uDT4";
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+		return "End.DT2U";
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		return "End.DT2M";
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DT46:
 		return "uDT46";
 	case ZEBRA_SEG6_LOCAL_ACTION_UNSPEC:
@@ -308,6 +312,10 @@ static const char *show_srv6_sid_seg6_context(char *str, size_t size, const stru
 	struct interface *ifp;
 
 	switch (behavior) {
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		snprintf(str, size, "VNI %u", ctx->vni);
+		break;
 	case ZEBRA_SEG6_LOCAL_ACTION_END:
 		break;
 	case ZEBRA_SEG6_LOCAL_ACTION_END_X:
@@ -457,6 +465,8 @@ static void do_show_srv6_sid_json(struct vty *vty, json_object **json, struct sr
 					       seg6local_action2str(sid_ctx->ctx.behavior));
 		}
 
+		if (sid_ctx->ctx.vni)
+			json_object_int_add(json_sid_ctx, "vni", sid_ctx->ctx.vni);
 		if (sid_ctx->ctx.vrf_id) {
 			json_object_int_add(json_sid_ctx, "vrfId", sid_ctx->ctx.vrf_id);
 

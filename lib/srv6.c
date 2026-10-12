@@ -48,6 +48,10 @@ const char *seg6local_action2str_with_next_csid(uint32_t action, bool has_next_c
 		return "End.AS";
 	case ZEBRA_SEG6_LOCAL_ACTION_END_AM:
 		return "End.AM";
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+		return "End.DT2U";
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		return "End.DT2M";
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DT46:
 		return has_next_csid ? "uDT46" : "End.DT46";
 	case ZEBRA_SEG6_LOCAL_ACTION_UNSPEC:

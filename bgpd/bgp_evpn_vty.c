@@ -3839,12 +3839,15 @@ DEFPY(bgp_evpn_vni_srv6, bgp_evpn_vni_srv6_cmd,
 	    IN6_IS_ADDR_UNSPECIFIED(&multicast) || IN6_IS_ADDR_MULTICAST(&multicast) ||
 	    IPV6_ADDR_SAME(&unicast, &multicast))
 		return CMD_WARNING;
-	if (vpn->srv6_l2)
+	if (vpn->srv6_l2) {
+		bgp_evpn_srv6_local_sids(vpn, false);
 		bgp_evpn_handle_rd_change(bgp, vpn, 1);
+	}
 	vpn->srv6_l2 = true;
 	vpn->srv6_dt2u_sid = unicast;
 	vpn->srv6_dt2m_sid = multicast;
 	ipaddr_set_v6(&vpn->originator_ip, &source);
+	bgp_evpn_srv6_local_sids(vpn, true);
 	if (is_vni_live(vpn)) {
 		update_routes_for_vni(bgp, vpn);
 		install_uninstall_routes_for_vni(bgp, vpn, true);
@@ -3858,6 +3861,7 @@ DEFPY(no_bgp_evpn_vni_srv6, no_bgp_evpn_vni_srv6_cmd,
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	VTY_DECLVAR_CONTEXT_SUB(bgpevpn, vpn);
 	if (vpn->srv6_l2) {
+		bgp_evpn_srv6_local_sids(vpn, false);
 		if (is_vni_live(vpn))
 			install_uninstall_routes_for_vni(bgp, vpn, false);
 		vpn->srv6_l2 = false;

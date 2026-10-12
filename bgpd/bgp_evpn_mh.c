@@ -1164,7 +1164,7 @@ static int bgp_evpn_type1_route_update(struct bgp *bgp, struct bgp_evpn_es *es,
 	 * from there. Note that this table is a 2-level tree (RD-level +
 	 * Prefix-level) similar to L3VPN routes.
 	 */
-	if (route_changed) {
+	if (route_changed && (!vpn || bgp_evpn_srv6_sids_ready(vpn))) {
 		struct bgp_path_info *global_pi;
 
 		dest = bgp_evpn_global_node_get(bgp->rib[afi][safi], afi, safi,

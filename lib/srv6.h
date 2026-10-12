@@ -74,6 +74,9 @@ enum seg6local_action_t {
 	ZEBRA_SEG6_LOCAL_ACTION_END_AM       = 14,
 	ZEBRA_SEG6_LOCAL_ACTION_END_BPF      = 15,
 	ZEBRA_SEG6_LOCAL_ACTION_END_DT46     = 16,
+	/* Native Ethernet behaviors; not Linux seg6_local action numbers. */
+	ZEBRA_SEG6_LOCAL_ACTION_END_DT2U     = 17,
+	ZEBRA_SEG6_LOCAL_ACTION_END_DT2M     = 18,
 };
 
 /* Flavor operations for SRv6 End* Behaviors */
@@ -395,6 +398,8 @@ struct srv6_sid_ctx {
 	struct in6_addr nh6;
 	vrf_id_t vrf_id;
 	ifindex_t ifindex;
+	/* MAC-VRF identity for End.DT2U/DT2M; nh6 is encapsulation source. */
+	uint32_t vni;
 };
 
 static inline const char *srv6_headend_behavior2str(enum srv6_headend_behavior behavior,
@@ -518,6 +523,11 @@ static inline const char *srv6_sid_ctx2str(char *str, size_t size,
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DT46:
 		snprintf(str + len, size - len, " vrf_id %u (%s)", ctx->vrf_id,
 			 vrf_id_to_name(ctx->vrf_id));
+		break;
+
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		snprintf(str + len, size - len, " vni %u", ctx->vni);
 		break;
 
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DX2:

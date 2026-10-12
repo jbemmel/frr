@@ -44,3 +44,72 @@ void bgp_evpn_srv6_notify(struct bgpevpn *vpn, const struct prefix_evpn *p,
 	stream_putw_at(s, 0, stream_get_endp(s));
 	zclient_send_message(bgp_zclient);
 }
+
+bool bgp_evpn_srv6_sids_ready(const struct bgpevpn *vpn)
+{
+	return !vpn->srv6_l2 || (vpn->srv6_l2_locator[0][0] && vpn->srv6_l2_locator[1][0]);
+}
+void bgp_evpn_srv6_local_sids(struct bgpevpn *vpn, bool add)
+{
+	if (!vpn->srv6_l2 || !bgp_zclient || bgp_zclient->sock < 0)
+		return;
+	for (int i = 0; i < 2; i++) {
+		struct srv6_sid_ctx ctx = {
+			.behavior = i ? ZEBRA_SEG6_LOCAL_ACTION_END_DT2M
+				      : ZEBRA_SEG6_LOCAL_ACTION_END_DT2U,
+			.vni = vpn->vni, .nh6 = vpn->originator_ip.ipaddr_v6,
+		};
+		if (add) {
+			struct in6_addr *sid = i ? &vpn->srv6_dt2m_sid : &vpn->srv6_dt2u_sid;
+			srv6_manager_get_sid(bgp_zclient, &ctx, sid, NULL, NULL, false);
+		} else {
+			srv6_manager_release_sid(bgp_zclient, &ctx, "", false);
+			vpn->srv6_l2_locator[i][0] = '\0';
+		}
+	}
+}
+static void replay_local_sids(struct hash_bucket *bucket, void *arg)
+{
+	struct bgpevpn *vpn = bucket->data;
+	if (vpn->srv6_l2) {
+		memset(vpn->srv6_l2_locator, 0, sizeof(vpn->srv6_l2_locator));
+		bgp_evpn_handle_rd_change(bgp_get_evpn(), vpn, 1);
+		bgp_evpn_srv6_local_sids(vpn, true);
+	}
+}
+void bgp_evpn_srv6_reconnect(void)
+{
+	struct bgp *bgp = bgp_get_evpn();
+	if (bgp && bgp->vnihash)
+		hash_iterate(bgp->vnihash, replay_local_sids, NULL);
+}
+
+struct evpn_locator_change {
+	struct srv6_locator *locator;
+	bool add;
+};
+static void local_locator_change(struct hash_bucket *bucket, void *arg)
+{
+	struct bgpevpn *vpn = bucket->data;
+	struct evpn_locator_change *change = arg;
+	struct prefix_ipv6 p = { .family = AF_INET6, .prefixlen = 128 };
+	if (!vpn->srv6_l2)
+		return;
+	p.prefix = vpn->srv6_dt2u_sid;
+	bool match = prefix_match((struct prefix *)&change->locator->prefix, (struct prefix *)&p);
+	p.prefix = vpn->srv6_dt2m_sid;
+	match |= prefix_match((struct prefix *)&change->locator->prefix, (struct prefix *)&p);
+	if (!match)
+		return;
+	memset(vpn->srv6_l2_locator, 0, sizeof(vpn->srv6_l2_locator));
+	bgp_evpn_handle_rd_change(bgp_get_evpn(), vpn, 1);
+	if (change->add)
+		bgp_evpn_srv6_local_sids(vpn, true);
+}
+void bgp_evpn_srv6_locator_change(struct srv6_locator *locator, bool add)
+{
+	struct bgp *bgp = bgp_get_evpn();
+	struct evpn_locator_change change = { .locator = locator, .add = add };
+	if (bgp && bgp->vnihash)
+		hash_iterate(bgp->vnihash, local_locator_change, &change);
+}
