@@ -3466,7 +3466,10 @@ static enum bgp_attr_parse_ret bgp_attr_srv6_service_data(struct bgp_attr_parser
 		transposition_offset = stream_getc(connection->curr);
 
 		/* Validate transposition values */
-		if (transposition_len > BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL ||
+		if (transposition_len >
+		    (bgp_attr_get_srv6_l3service(attr)->service_type ==
+			     BGP_PREFIX_SID_SRV6_L2_SERVICE
+		     ? 24 : BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL) ||
 		    transposition_offset >= IPV6_MAX_BITLEN ||
 		    transposition_len + transposition_offset > IPV6_MAX_BITLEN) {
 			flog_err(EC_BGP_ATTR_LEN,

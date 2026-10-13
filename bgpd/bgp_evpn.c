@@ -1288,7 +1288,7 @@ static enum zclient_send_status bgp_zebra_send_remote_macip(
 static enum zclient_send_status
 bgp_zebra_send_remote_vtep(struct bgp *bgp, struct bgpevpn *vpn,
 			   const struct prefix_evpn *p, int flood_control,
-			   int add)
+			   int add, const struct bgp_path_info *pi)
 {
 	struct stream *s;
 
@@ -1316,7 +1316,15 @@ bgp_zebra_send_remote_vtep(struct bgp *bgp, struct bgpevpn *vpn,
 		s, add ? ZEBRA_REMOTE_VTEP_ADD : ZEBRA_REMOTE_VTEP_DEL,
 		bgp->vrf_id);
 	stream_putl(s, vpn ? vpn->vni : 0);
-	stream_put_ipaddr(s, &p->prefix.imet_addr.ip);
+	/* XR may use an IPv4 router ID in the NLRI and an IPv6 BGP next hop.
+	 * SRv6 peer identity must match the SID metadata sent to Zebra. */
+	if (vpn && vpn->srv6_l2 && pi &&
+	    NEXTHOP_FAMILY(pi->attr->mp_nexthop_len) == AF_INET6) {
+		struct ipaddr peer;
+		ipaddr_set_v6(&peer, &pi->attr->mp_nexthop_global);
+		stream_put_ipaddr(s, &peer);
+	} else
+		stream_put_ipaddr(s, &p->prefix.imet_addr.ip);
 	stream_putl(s, flood_control);
 
 	stream_putw_at(s, 0, stream_get_endp(s));
@@ -1479,7 +1487,8 @@ void bgp_evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
 	service->loc_block_len = 32;
 	service->loc_node_len = 16;
 	service->func_len = 32;
-	service->arg_len = 48;
+	/* End.DT2M reserves a 16-bit Arg.FE2, not all unused SID bits. */
+	service->arg_len = imet ? 16 : 0;
 	bgp_attr_set_srv6_l3service(attr, service);
 	bgp_attr_set(attr, BGP_ATTR_PREFIX_SID);
 	memset(&attr->label, 0, sizeof(attr->label));
@@ -1652,7 +1661,7 @@ enum zclient_send_status evpn_zebra_install(struct bgp *bgp, struct bgpevpn *vpn
 			break;
 		}
 
-		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p, flood_control, 1);
+		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p, flood_control, 1, pi);
 	}
 
 	return ret;
@@ -1695,7 +1704,7 @@ enum zclient_send_status evpn_zebra_uninstall(struct bgp *bgp,
 		ret = bgp_evpn_remote_es_evi_del(bgp, vpn, p, pi);
 	else
 		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p,
-						 VXLAN_FLOOD_DISABLED, 0);
+						 VXLAN_FLOOD_DISABLED, 0, pi);
 
 	return ret;
 }
@@ -2381,7 +2390,7 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 
 		/* The VNI goes into the 'label' field of the route */
 		if (vpn->srv6_l2)
-			memset(&bgp_labels.label[0], 0, sizeof(bgp_labels.label[0]));
+			encode_label_bos(MPLS_LABEL_IMPLICIT_NULL, &bgp_labels.label[0], false);
 		else
 			vni2label(vpn->vni, &bgp_labels.label[0]);
 		bgp_labels.num_labels = 1;
@@ -2428,7 +2437,7 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 			 * be advertised with right labels.
 			 */
 			if (vpn->srv6_l2)
-				memset(&bgp_labels.label[0], 0, sizeof(bgp_labels.label[0]));
+				encode_label_bos(MPLS_LABEL_IMPLICIT_NULL, &bgp_labels.label[0], false);
 			else
 				vni2label(vpn->vni, &bgp_labels.label[0]);
 			bgp_labels.num_labels = 1;
