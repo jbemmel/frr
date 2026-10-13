@@ -79,6 +79,7 @@
 #include "bgpd/bgp_encap_types.h"
 #include "bgpd/bgp_encap_tlv.h"
 #include "bgpd/bgp_evpn.h"
+#include "bgpd/bgp_evpn_srv6_sid.h"
 #include "bgpd/bgp_evpn_mh.h"
 #include "bgpd/bgp_evpn_vty.h"
 #include "bgpd/bgp_flowspec.h"
@@ -13674,9 +13675,25 @@ static void route_vty_out_detail_remote_sid(struct vty *vty, struct bgp_path_inf
 
 		json_object_string_addf(json_path, "remoteSid", "%pI6", &srv6_l3service->sid);
 		IPV6_ADDR_COPY(&sid_transposed, &srv6_l3service->sid);
-		transpose_sid(&sid_transposed, label_sid, srv6_l3service->transposition_offset,
-			      srv6_l3service->transposition_len,
-			      BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL);
+		if (srv6_l3service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE) {
+			const struct prefix_evpn *p =
+				(const struct prefix_evpn *)bgp_dest_get_prefix(path->net);
+			const uint8_t *label = NULL;
+			if (p->prefix.route_type == BGP_EVPN_IMET_ROUTE)
+				label = (const uint8_t *)&path->attr->label;
+			else if (BGP_PATH_INFO_NUM_LABELS(path))
+				label = (const uint8_t *)&path->extra->labels->label[0];
+			bgp_evpn_srv6_sid_decode(&sid_transposed, &srv6_l3service->sid, label,
+						 srv6_l3service->loc_block_len,
+						 srv6_l3service->loc_node_len,
+						 srv6_l3service->func_len,
+						 srv6_l3service->arg_len,
+						 srv6_l3service->transposition_len,
+						 srv6_l3service->transposition_offset);
+		} else
+			transpose_sid(&sid_transposed, label_sid, srv6_l3service->transposition_offset,
+				      srv6_l3service->transposition_len,
+				      BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL);
 		json_object_string_addf(json_path, "remoteTransposedSid", "%pI6", &sid_transposed);
 		json_object_string_add(json_path, "endpointBehavior",
 				       srv6_endpoint_behavior_codepoint2str(

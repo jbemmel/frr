@@ -6,6 +6,11 @@ class TestAttrParse(frrtest.TestMultiOut):
     program = "./test_attr_parse"
 
 
+TestAttrParse.okfail("xr-udt2u: SRv6 EVPN transposition bounds")
+TestAttrParse.okfail("xr-udt2m: SRv6 EVPN transposition bounds")
+TestAttrParse.okfail("evpn-transpose-24: SRv6 EVPN transposition bounds")
+TestAttrParse.okfail("evpn-transpose-25-invalid: SRv6 EVPN transposition bounds")
+TestAttrParse.okfail("l3-transpose-24-invalid: SRv6 EVPN transposition bounds")
 TestAttrParse.okfail("baseline-ebgp: well-formed ORIGIN + AS_PATH + NEXT_HOP, eBGP")
 TestAttrParse.okfail(
     "short-attr-header-ebgp: two trailing octets, too few for an attribute header, eBGP"
