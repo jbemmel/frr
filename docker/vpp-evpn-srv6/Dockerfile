@@ -13,17 +13,18 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PKG_VERSION=25.10 \
 	PKG_SUFFIX=0 \
 	SOURCE_DATE_EPOCH=0
-ARG VPP_REF
-ARG VPP_REPO
-ARG VPP_COMMIT
 RUN apt-get update && apt-get install -y --no-install-recommends \
 		bash \
 		ca-certificates \
+		ccache \
 		git \
 		make \
 		sudo \
 	&& rm -rf /var/lib/apt/lists/*
 WORKDIR /src
+ARG VPP_REF
+ARG VPP_REPO
+ARG VPP_COMMIT
 RUN git init . \
 	&& git remote add origin "$VPP_REPO" \
 	&& git fetch --depth 1 origin "${VPP_COMMIT:-$VPP_REF}" \
@@ -33,7 +34,12 @@ RUN git init . \
 # debian-12 install-dep asks for clang-format-19, which bookworm may not ship.
 # Checkstyle is not used for this image.
 # Bookworm nasm is 2.16.01; intel-ipsec-mb needs >= 2.16.02 for SM3/SM4/SHA512-NI.
-RUN apt-get update \
+ENV CCACHE_DIR=/var/cache/ccache/vpp \
+    CCACHE_MAXSIZE=2G \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_BASEDIR=/src
+RUN --mount=type=cache,target=/var/cache/ccache/vpp \
+    apt-get update \
 	&& if ! apt-cache show clang-format-19 >/dev/null 2>&1; then \
 		sed -i 's/clang-format-19/clang-format-14/' Makefile; \
 	fi \
@@ -51,6 +57,7 @@ RUN apt-get update \
 	&& make install-ext-deps \
 	&& make build-release \
 	&& make pkg-deb \
+	&& ccache --show-stats \
 	&& mkdir -p /out \
 	&& find . -maxdepth 2 -name '*.deb' ! -name 'vpp-dbg*' ! -name 'vom*' -exec cp {} /out/ \; \
 	&& test -n "$(ls /out/vpp_*.deb)" \
@@ -105,44 +112,60 @@ RUN set -eux; \
 CMD ["/usr/bin/vpp", "-c", "/etc/vpp/startup.conf"]
 
 FROM vpp-base AS evpn-plugin
-ARG EVPN_REPO=https://github.com/exergy-connect/vpp-evpn-plugin.git
-ARG EVPN_REF=feature/ipv6-dual-stack
-ARG EVPN_COMMIT=
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake git ca-certificates python3 python3-ply \
+    build-essential ccache cmake git ca-certificates python3 python3-ply \
     && rm -rf /var/lib/apt/lists/*
 # vpp-base installed /out/*.deb from vpp-build, including its development packages.
 # Never install headers or libraries from a separate VPP package repository.
+ARG EVPN_REPO=https://github.com/exergy-connect/vpp-evpn-plugin.git
+ARG EVPN_REF=feature/ipv6-dual-stack
+ARG EVPN_COMMIT=
 RUN mkdir -p /src/evpn && cd /src/evpn \
     && git init . && git remote add origin "$EVPN_REPO" \
     && git fetch --depth 1 origin "${EVPN_COMMIT:-$EVPN_REF}" \
     && git checkout --detach FETCH_HEAD
-RUN cmake -S /src/evpn -B /src/evpn/build \
-    -DCMAKE_BUILD_TYPE=Release -DVPP_EXTERNAL_PROJECT=ON \
+ENV CCACHE_DIR=/var/cache/ccache/evpn \
+    CCACHE_MAXSIZE=256M \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_BASEDIR=/src/evpn
+RUN --mount=type=cache,target=/var/cache/ccache/evpn \
+    cmake -S /src/evpn -B /src/evpn/build \
+    -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache -DVPP_EXTERNAL_PROJECT=ON \
     -DVPP_INSTALL_PATH=/usr -DCMAKE_INSTALL_PREFIX=/usr \
     && cmake --build /src/evpn/build -j4 \
+    && ccache --show-stats \
     && DESTDIR=/runtime cmake --install /src/evpn/build \
     && test -s /runtime/usr/lib/x86_64-linux-gnu/vpp_plugins/evpn_plugin.so \
     && mkdir -p /runtime/usr/share/vpp/evpn \
     && git -C /src/evpn rev-parse HEAD > /runtime/usr/share/vpp/evpn/plugin.commit
 
-FROM vpp-base AS build
-ARG FRR_COMMIT=working-tree
+FROM vpp-base AS frr-build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential git ca-certificates autoconf automake \
+    build-essential ccache git ca-certificates autoconf automake \
     libtool pkg-config bison flex libjson-c-dev libc-ares-dev libpcre2-dev \
     libreadline-dev libyang-dev python3-dev libcap-dev libelf-dev \
     protobuf-c-compiler libprotobuf-c-dev && rm -rf /var/lib/apt/lists/*
 # Build the workflow checkout, including exactly the triggering FRR commit.
 COPY . /src/frr
 WORKDIR /src/frr
-RUN ./bootstrap.sh && ./configure --prefix=/usr --sysconfdir=/etc \
+ENV PATH=/usr/lib/ccache:$PATH \
+    CCACHE_DIR=/var/cache/ccache/frr \
+    CCACHE_MAXSIZE=1G \
+    CCACHE_COMPILERCHECK=content \
+    CCACHE_BASEDIR=/src/frr
+RUN --mount=type=cache,target=/var/cache/ccache/frr \
+    ./bootstrap.sh && ./configure --prefix=/usr --sysconfdir=/etc \
     --localstatedir=/var --sbindir=/usr/lib/frr --libdir=/usr/lib/x86_64-linux-gnu \
     --enable-user=frr --enable-group=frr --enable-vty-group=frrvty \
     --enable-vtysh --enable-multipath=64 --disable-doc \
     && make -j4 && make DESTDIR=/runtime install \
-    && mkdir -p /runtime/usr/share/vpp/evpn \
+    && ccache --show-stats
+
+FROM frr-build AS build
+# Commit labels must not invalidate dependency installation or compilation.
+ARG FRR_COMMIT=working-tree
+RUN mkdir -p /runtime/usr/share/vpp/evpn \
        /runtime/usr/lib/x86_64-linux-gnu/vpp_plugins \
     && printf '%s\n' "$FRR_COMMIT" > /runtime/usr/share/vpp/evpn/frr.commit
 COPY --from=evpn-plugin /runtime/ /runtime/
@@ -150,6 +173,9 @@ COPY --from=evpn-plugin /src/evpn/evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
 RUN cmp /src/frr/zebra/zebra_evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
 
 FROM vpp-base
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libyang3 libprotobuf-c1 libcap2 libelf1 libreadline8 libc-ares2 libjson-c5 \
+    && rm -rf /var/lib/apt/lists/*
 ARG FRR_COMMIT=working-tree
 ARG EVPN_REF=feature/ipv6-dual-stack
 ENV DEBIAN_FRONTEND=noninteractive
@@ -159,9 +185,6 @@ LABEL org.opencontainers.image.revision="$FRR_COMMIT" \
       io.xform.frr.commit="$FRR_COMMIT" \
       io.xform.evpn.source="https://github.com/exergy-connect/vpp-evpn-plugin" \
       io.xform.evpn.ref="$EVPN_REF"
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libyang3 libprotobuf-c1 libcap2 libelf1 libreadline8 libc-ares2 libjson-c5 \
-    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /runtime/ /
 RUN mkdir -p /etc/frr /run/frr /var/log/frr /run/vpp \
     && chown -R frr:frr /etc/frr /run/frr /var/log/frr \
