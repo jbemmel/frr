@@ -74,6 +74,9 @@ enum seg6local_action_t {
 	ZEBRA_SEG6_LOCAL_ACTION_END_AM       = 14,
 	ZEBRA_SEG6_LOCAL_ACTION_END_BPF      = 15,
 	ZEBRA_SEG6_LOCAL_ACTION_END_DT46     = 16,
+	/* Native Ethernet behaviors; not Linux seg6_local action numbers. */
+	ZEBRA_SEG6_LOCAL_ACTION_END_DT2U     = 17,
+	ZEBRA_SEG6_LOCAL_ACTION_END_DT2M     = 18,
 };
 
 /* Flavor operations for SRv6 End* Behaviors */
@@ -208,6 +211,8 @@ enum srv6_endpoint_behavior_codepoint {
 	SRV6_ENDPOINT_BEHAVIOR_END_DT6          = 0x0012,
 	SRV6_ENDPOINT_BEHAVIOR_END_DT4          = 0x0013,
 	SRV6_ENDPOINT_BEHAVIOR_END_DT46         = 0x0014,
+	SRV6_ENDPOINT_BEHAVIOR_END_DT2U         = 0x0017,
+	SRV6_ENDPOINT_BEHAVIOR_END_DT2M         = 0x0018,
 	SRV6_ENDPOINT_BEHAVIOR_END_B6_ENCAPS_RED = 0x001B,
 	SRV6_ENDPOINT_BEHAVIOR_END_PSP_USD      = 0x001D,
 	SRV6_ENDPOINT_BEHAVIOR_END_X_PSP_USD    = 0x0021,
@@ -220,6 +225,8 @@ enum srv6_endpoint_behavior_codepoint {
 	SRV6_ENDPOINT_BEHAVIOR_END_DT6_USID     = 0x003E,
 	SRV6_ENDPOINT_BEHAVIOR_END_DT4_USID     = 0x003F,
 	SRV6_ENDPOINT_BEHAVIOR_END_DT46_USID    = 0x0040,
+	SRV6_ENDPOINT_BEHAVIOR_END_DT2U_USID    = 0x0043,
+	SRV6_ENDPOINT_BEHAVIOR_END_DT2M_USID    = 0x0044,
 	SRV6_ENDPOINT_BEHAVIOR_END_B6_ENCAPS_NEXT_CSID = 0x005D,
 	SRV6_ENDPOINT_BEHAVIOR_END_B6_ENCAPS_RED_NEXT_CSID = 0x005E,
 	SRV6_ENDPOINT_BEHAVIOR_OPAQUE           = 0xFFFF,
@@ -282,6 +289,14 @@ srv6_endpoint_behavior_codepoint2str(enum srv6_endpoint_behavior_codepoint behav
 		return "End.DT6";
 	case SRV6_ENDPOINT_BEHAVIOR_END_DT4:
 		return "End.DT4";
+	case SRV6_ENDPOINT_BEHAVIOR_END_DT2U_USID:
+		return "uDT2U";
+	case SRV6_ENDPOINT_BEHAVIOR_END_DT2M_USID:
+		return "uDT2M";
+	case SRV6_ENDPOINT_BEHAVIOR_END_DT2U:
+		return "End.DT2U";
+	case SRV6_ENDPOINT_BEHAVIOR_END_DT2M:
+		return "End.DT2M";
 	case SRV6_ENDPOINT_BEHAVIOR_END_DT46:
 		return "End.DT46";
 	case SRV6_ENDPOINT_BEHAVIOR_END_B6_ENCAPS_RED:
@@ -389,6 +404,8 @@ struct srv6_sid_ctx {
 	struct in6_addr nh6;
 	vrf_id_t vrf_id;
 	ifindex_t ifindex;
+	/* MAC-VRF identity for End.DT2U/DT2M; nh6 is encapsulation source. */
+	uint32_t vni;
 };
 
 static inline const char *srv6_headend_behavior2str(enum srv6_headend_behavior behavior,
@@ -512,6 +529,11 @@ static inline const char *srv6_sid_ctx2str(char *str, size_t size,
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DT46:
 		snprintf(str + len, size - len, " vrf_id %u (%s)", ctx->vrf_id,
 			 vrf_id_to_name(ctx->vrf_id));
+		break;
+
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2U:
+	case ZEBRA_SEG6_LOCAL_ACTION_END_DT2M:
+		snprintf(str + len, size - len, " vni %u", ctx->vni);
 		break;
 
 	case ZEBRA_SEG6_LOCAL_ACTION_END_DX2:

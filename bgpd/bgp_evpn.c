@@ -1288,7 +1288,7 @@ static enum zclient_send_status bgp_zebra_send_remote_macip(
 static enum zclient_send_status
 bgp_zebra_send_remote_vtep(struct bgp *bgp, struct bgpevpn *vpn,
 			   const struct prefix_evpn *p, int flood_control,
-			   int add)
+			   int add, const struct bgp_path_info *pi)
 {
 	struct stream *s;
 
@@ -1316,7 +1316,15 @@ bgp_zebra_send_remote_vtep(struct bgp *bgp, struct bgpevpn *vpn,
 		s, add ? ZEBRA_REMOTE_VTEP_ADD : ZEBRA_REMOTE_VTEP_DEL,
 		bgp->vrf_id);
 	stream_putl(s, vpn ? vpn->vni : 0);
-	stream_put_ipaddr(s, &p->prefix.imet_addr.ip);
+	/* XR may use an IPv4 router ID in the NLRI and an IPv6 BGP next hop.
+	 * SRv6 peer identity must match the SID metadata sent to Zebra. */
+	if (vpn && vpn->srv6_l2 && pi &&
+	    NEXTHOP_FAMILY(pi->attr->mp_nexthop_len) == AF_INET6) {
+		struct ipaddr peer;
+		ipaddr_set_v6(&peer, &pi->attr->mp_nexthop_global);
+		stream_put_ipaddr(s, &peer);
+	} else
+		stream_put_ipaddr(s, &p->prefix.imet_addr.ip);
 	stream_putl(s, flood_control);
 
 	stream_putw_at(s, 0, stream_get_endp(s));
@@ -1404,10 +1412,12 @@ static void build_evpn_route_extcomm(struct bgpevpn *vpn, struct attr *attr, int
 	ecom = ecommunity_new();
 
 	/* Encap. This is the first community; the ones below extend it. */
-	tnl_type = BGP_ENCAP_TYPE_VXLAN;
-	encode_encap_extcomm(tnl_type, &eval_tmp);
-	ecommunity_append_val_unchecked(ecom, &eval_tmp);
-	attr->encap_tunneltype = tnl_type;
+	if (!vpn->srv6_l2) {
+		tnl_type = BGP_ENCAP_TYPE_VXLAN;
+		encode_encap_extcomm(tnl_type, &eval_tmp);
+		ecommunity_append_val_unchecked(ecom, &eval_tmp);
+		attr->encap_tunneltype = tnl_type;
+	}
 
 	/* Add the export RTs for L2VNI (the effective export list is
 	 * sorted and duplicate free)
@@ -1460,6 +1470,28 @@ static void build_evpn_route_extcomm(struct bgpevpn *vpn, struct attr *attr, int
 	 * so it must see the fully built (non-empty) community.
 	 */
 	bgp_attr_set_ecommunity(attr, ecom);
+}
+
+/* Full SID encoding (no label transposition), RFC 9252 sections 6.2/6.3.
+ * The VNI remains the MAC-VRF identifier; no VXLAN encapsulation is used. */
+void bgp_evpn_srv6_l2_attr(struct bgpevpn *vpn, struct attr *attr, bool imet)
+{
+	struct bgp_attr_srv6_l3service *service;
+
+	if (!vpn->srv6_l2)
+		return;
+	service = XCALLOC(MTYPE_BGP_SRV6_L3SERVICE, sizeof(*service));
+	service->service_type = BGP_PREFIX_SID_SRV6_L2_SERVICE;
+	service->sid = imet ? vpn->srv6_dt2m_sid : vpn->srv6_dt2u_sid;
+	service->endpoint_behavior = imet ? 24 : 23; /* End.DT2M / End.DT2U */
+	service->loc_block_len = 32;
+	service->loc_node_len = 16;
+	service->func_len = 32;
+	/* End.DT2M reserves a 16-bit Arg.FE2, not all unused SID bits. */
+	service->arg_len = imet ? 16 : 0;
+	bgp_attr_set_srv6_l3service(attr, service);
+	bgp_attr_set(attr, BGP_ATTR_PREFIX_SID);
+	memset(&attr->label, 0, sizeof(attr->label));
 }
 
 /*
@@ -1528,6 +1560,9 @@ enum zclient_send_status evpn_zebra_install(struct bgp *bgp, struct bgpevpn *vpn
 	uint32_t seq;
 	enum zclient_send_status ret = ZCLIENT_SEND_SUCCESS;
 	struct ipaddr vtep_ip = { .ipa_type = IPADDR_V4, .ipaddr_v4 = { INADDR_ANY } };
+
+	if (vpn->srv6_l2)
+		bgp_evpn_srv6_notify(vpn, p, pi, true);
 
 	if (p->prefix.route_type == BGP_EVPN_MAC_IP_ROUTE) {
 		flags = 0;
@@ -1626,7 +1661,7 @@ enum zclient_send_status evpn_zebra_install(struct bgp *bgp, struct bgpevpn *vpn
 			break;
 		}
 
-		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p, flood_control, 1);
+		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p, flood_control, 1, pi);
 	}
 
 	return ret;
@@ -1641,6 +1676,7 @@ enum zclient_send_status evpn_zebra_uninstall(struct bgp *bgp,
 {
 	enum zclient_send_status ret = ZCLIENT_SEND_SUCCESS;
 	struct ipaddr vtep_ip;
+
 
 	if (p->prefix.route_type == BGP_EVPN_MAC_IP_ROUTE) {
 		uint8_t nhfamily = NEXTHOP_FAMILY(pi->attr->mp_nexthop_len);
@@ -1668,7 +1704,7 @@ enum zclient_send_status evpn_zebra_uninstall(struct bgp *bgp,
 		ret = bgp_evpn_remote_es_evi_del(bgp, vpn, p, pi);
 	else
 		ret = bgp_zebra_send_remote_vtep(bgp, vpn, p,
-						 VXLAN_FLOOD_DISABLED, 0);
+						 VXLAN_FLOOD_DISABLED, 0, pi);
 
 	return ret;
 }
@@ -2356,7 +2392,10 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 		bgp_path_info_extra_get(tmp_pi);
 
 		/* The VNI goes into the 'label' field of the route */
-		vni2label(vpn->vni, &bgp_labels.label[0]);
+		if (vpn->srv6_l2)
+			encode_label_bos(MPLS_LABEL_IMPLICIT_NULL, &bgp_labels.label[0], false);
+		else
+			vni2label(vpn->vni, &bgp_labels.label[0]);
 		bgp_labels.num_labels = 1;
 
 		/* Type-2 routes may carry a second VNI - the L3-VNI.
@@ -2400,7 +2439,10 @@ static int update_evpn_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 			 * The attributes have changed, type-2 routes needs to
 			 * be advertised with right labels.
 			 */
-			vni2label(vpn->vni, &bgp_labels.label[0]);
+			if (vpn->srv6_l2)
+				encode_label_bos(MPLS_LABEL_IMPLICIT_NULL, &bgp_labels.label[0], false);
+			else
+				vni2label(vpn->vni, &bgp_labels.label[0]);
 			bgp_labels.num_labels = 1;
 			if (bgp_evpn_is_macip_with_l3vni(vpn, evp)) {
 				vni_t l3vni;
@@ -2622,6 +2664,7 @@ static int update_evpn_route(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
+	bgp_evpn_srv6_l2_attr(vpn, &attr, p->prefix.route_type == BGP_EVPN_IMET_ROUTE);
 
 	/* First, create (or fetch) route node within the VNI.
 	 * NOTE: There is no RD here.
@@ -2696,7 +2739,7 @@ static int update_evpn_route(struct bgp *bgp, struct bgpevpn *vpn,
 	 * from there. Note that this table is a 2-level tree (RD-level +
 	 * Prefix-level) similar to L3VPN routes.
 	 */
-	if (route_change) {
+	if (route_change && bgp_evpn_srv6_sids_ready(vpn)) {
 		struct bgp_path_info *global_pi;
 
 		dest = bgp_evpn_global_node_get(bgp->rib[afi][safi], afi, safi,
@@ -2911,6 +2954,7 @@ void bgp_evpn_update_type2_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 
 	/* Set up extended community. */
 	build_evpn_route_extcomm(vpn, &attr, add_l3_attrs, macvrf_soo);
+	bgp_evpn_srv6_l2_attr(vpn, &attr, false);
 	seq = mac_mobility_seqnum(local_pi->attr);
 
 	if (bgp_debug_zebra(NULL)) {
@@ -2980,7 +3024,7 @@ void bgp_evpn_update_type2_route_entry(struct bgp *bgp, struct bgpevpn *vpn,
 	/* unlock pi */
 	bgp_path_info_unlock(pi);
 
-	if (route_change) {
+	if (route_change && bgp_evpn_srv6_sids_ready(vpn)) {
 		/* Update route in global routing table. */
 		global_dest = bgp_evpn_global_node_get(
 			bgp->rib[afi][safi], afi, safi, &evp, &vpn->prd, NULL);
@@ -5235,6 +5279,9 @@ static void update_advertise_vni_routes(struct bgp *bgp, struct bgpevpn *vpn)
 	struct attr *attr;
 	afi_t afi = AFI_L2VPN;
 	safi_t safi = SAFI_EVPN;
+
+	if (!bgp_evpn_srv6_sids_ready(vpn))
+		return;
 
 	/* Locate type-3 route for VNI in the per-VNI table and use its
 	 * attributes to create and advertise the type-3 route for this VNI
@@ -7754,6 +7801,7 @@ struct bgpevpn *bgp_evpn_new(struct bgp *bgp, vni_t vni, struct ipaddr *originat
  */
 void bgp_evpn_free(struct bgp *bgp, struct bgpevpn *vpn)
 {
+	bgp_evpn_srv6_local_sids(vpn, false);
 	bgp_evpn_remote_ip_hash_destroy(vpn);
 	bgp_evpn_vni_es_cleanup(vpn);
 	bgpevpn_unlink_from_l3vni(vpn);

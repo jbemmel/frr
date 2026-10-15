@@ -62,6 +62,11 @@ RB_PROTOTYPE(bgp_es_evi_rb_head, bgp_evpn_es_evi, rb_node,
  */
 struct bgpevpn {
 	vni_t vni;
+	/* Native SRv6 MAC-VRF, provisioned independently of kernel VXLAN. */
+	bool srv6_l2;
+	char srv6_l2_locator[2][SRV6_LOCNAME_SIZE];
+	struct in6_addr srv6_dt2u_sid;
+	struct in6_addr srv6_dt2m_sid;
 	vrf_id_t tenant_vrf_id;
 	ifindex_t svi_ifindex;
 	uint32_t flags;

@@ -79,6 +79,7 @@
 #include "bgpd/bgp_encap_types.h"
 #include "bgpd/bgp_encap_tlv.h"
 #include "bgpd/bgp_evpn.h"
+#include "bgpd/bgp_evpn_srv6_sid.h"
 #include "bgpd/bgp_evpn_mh.h"
 #include "bgpd/bgp_evpn_vty.h"
 #include "bgpd/bgp_flowspec.h"
@@ -12542,8 +12543,16 @@ void route_vty_out(struct vty *vty, const struct prefix *p, struct bgp_path_info
 	bool ll_nexthop_only = attr->mp_nexthop_len == BGP_ATTR_NHLEN_IPV6_GLOBAL &&
 			       PEER_HAS_LINK_LOCAL_CAPABILITY(path->peer);
 
-	if (json_paths)
+	if (json_paths) {
 		json_path = json_object_new_object();
+		struct bgp_attr_srv6_l3service *service = bgp_attr_get_srv6_l3service(attr);
+		if (service && service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE) {
+			json_object_string_addf(json_path, "remoteSid", "%pI6", &service->sid);
+			json_object_int_add(json_path, "srv6EndpointBehavior", service->endpoint_behavior);
+			json_object_int_add(json_path, "srv6TranspositionLength", service->transposition_len);
+			json_object_string_add(json_path, "prefixSidType", "l2");
+		}
+	}
 
 	/* short status lead text */
 	route_vty_short_status_out(vty, path, p, json_path);
@@ -13666,14 +13675,31 @@ static void route_vty_out_detail_remote_sid(struct vty *vty, struct bgp_path_inf
 
 		json_object_string_addf(json_path, "remoteSid", "%pI6", &srv6_l3service->sid);
 		IPV6_ADDR_COPY(&sid_transposed, &srv6_l3service->sid);
-		transpose_sid(&sid_transposed, label_sid, srv6_l3service->transposition_offset,
-			      srv6_l3service->transposition_len,
-			      BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL);
+		if (srv6_l3service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE) {
+			const struct prefix_evpn *p =
+				(const struct prefix_evpn *)bgp_dest_get_prefix(path->net);
+			const uint8_t *label = NULL;
+			if (p->prefix.route_type == BGP_EVPN_IMET_ROUTE)
+				label = (const uint8_t *)&path->attr->label;
+			else if (BGP_PATH_INFO_NUM_LABELS(path))
+				label = (const uint8_t *)&path->extra->labels->label[0];
+			bgp_evpn_srv6_sid_decode(&sid_transposed, &srv6_l3service->sid, label,
+						 srv6_l3service->loc_block_len,
+						 srv6_l3service->loc_node_len,
+						 srv6_l3service->func_len,
+						 srv6_l3service->arg_len,
+						 srv6_l3service->transposition_len,
+						 srv6_l3service->transposition_offset);
+		} else
+			transpose_sid(&sid_transposed, label_sid, srv6_l3service->transposition_offset,
+				      srv6_l3service->transposition_len,
+				      BGP_PREFIX_SID_SRV6_MAX_FUNCTION_LENGTH_FOR_LABEL);
 		json_object_string_addf(json_path, "remoteTransposedSid", "%pI6", &sid_transposed);
 		json_object_string_add(json_path, "endpointBehavior",
 				       srv6_endpoint_behavior_codepoint2str(
 					       srv6_l3service->endpoint_behavior));
-		json_object_string_add(json_path, "prefixSidType", "l3");
+		json_object_string_add(json_path, "prefixSidType",
+				       srv6_l3service->service_type == BGP_PREFIX_SID_SRV6_L2_SERVICE ? "l2" : "l3");
 
 		json_sid_attr = json_object_new_object();
 		json_object_object_add(json_path, "remoteSidStructure", json_sid_attr);

@@ -39,6 +39,7 @@
 #include "zebra/zebra_evpn_mac.h"
 #include "zebra/zebra_router.h"
 #include "zebra/zebra_evpn_mh.h"
+#include "zebra/zebra_evpn_srv6.h"
 #include "zebra/zebra_nhg.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, ZACC_BD, "Access Broadcast Domain");
@@ -3289,6 +3290,8 @@ static void zebra_evpn_local_mac_oper_state_change(struct zebra_evpn_es *es)
 
 void zebra_evpn_es_if_oper_state_change(struct zebra_if *zif, bool up)
 {
+	/* A VPP-owned ES uses its real bond state, not its metadata link. */
+	up = zebra_evpn_srv6_oper_state(zif->ifp->ifindex, up);
 	struct zebra_evpn_es *es = zif->es_info.es;
 	bool old_up = !!(es->flags & ZEBRA_EVPNES_OPER_UP);
 
@@ -4277,4 +4280,20 @@ void zebra_evpn_mh_terminate(void)
 	bf_free(zmh_info->sph_id_bitmap);
 
 	XFREE(MTYPE_ZMH_INFO, zrouter.mh_info);
+}
+
+/* Re-enqueue native MH dataplane objects after a backend reconnect. */
+static void evpn_nh_resync(struct hash_bucket *bucket, void *arg)
+{
+	struct zebra_evpn_l2_nh *nh = bucket->data;
+	dplane_nh_fdb_add(nh->nh_id, &nh->vtep_ip);
+}
+void zebra_evpn_mh_dplane_resync(void)
+{
+	hash_iterate(zmh_info->nh_ip_table, evpn_nh_resync, NULL);
+	struct zebra_evpn_es *es;
+	RB_FOREACH (es, zebra_es_rb_head, &zmh_info->es_rb_tree) {
+		zebra_evpn_nhg_update(es);
+		zebra_evpn_es_br_port_dplane_update(es, __func__);
+	}
 }

@@ -801,6 +801,10 @@ bool dplane_ctx_intf_is_broadcast(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_intf_set_broadcast(struct zebra_dplane_ctx *ctx);
 bool dplane_ctx_intf_is_tentative(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_intf_set_tentative(struct zebra_dplane_ctx *ctx);
+/* Immutable SRv6 Ethernet encapsulation metadata for dataplane providers. */
+bool dplane_ctx_is_evpn_srv6(const struct zebra_dplane_ctx *ctx);
+uint32_t dplane_ctx_get_evpn_srv6_epoch(const struct zebra_dplane_ctx *ctx);
+const struct in6_addr *dplane_ctx_get_evpn_srv6_sid(const struct zebra_dplane_ctx *ctx);
 bool dplane_ctx_intf_is_dadfailed(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_intf_set_dadfailed(struct zebra_dplane_ctx *ctx);
 const struct prefix *dplane_ctx_get_intf_addr(

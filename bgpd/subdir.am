@@ -39,6 +39,7 @@ bgpd_libbgp_a_SOURCES = \
 	bgpd/bgp_encap_tlv.c \
 	bgpd/bgp_errors.c \
 	bgpd/bgp_evpn.c \
+	bgpd/bgp_evpn_srv6.c \
 	bgpd/bgp_evpn_mh.c \
 	bgpd/bgp_evpn_vty.c \
 	bgpd/bgp_filter.c \
@@ -128,6 +129,7 @@ noinst_HEADERS += \
 	bgpd/bgp_encap_types.h \
 	bgpd/bgp_errors.h \
 	bgpd/bgp_evpn.h \
+	bgpd/bgp_evpn_srv6_sid.h \
 	bgpd/bgp_evpn_mh.h \
 	bgpd/bgp_evpn_private.h \
 	bgpd/bgp_evpn_vty.h \
