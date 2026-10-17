@@ -182,7 +182,7 @@ static const struct message bgp_pmsi_tnltype_str[] = {
 
 static int clear_batch_rib_helper(struct bgp_clearing_info *cinfo);
 static void bgp_gr_start_tier2_timer_if_required(struct bgp *bgp, afi_t afi, safi_t safi);
-static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, const struct prefix *p, afi_t afi,
+static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, struct bgp_dest *dest, afi_t afi,
 					    safi_t safi, struct bgp_path_info *new_select);
 
 /*
@@ -4411,8 +4411,10 @@ void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, saf
 	 * we ignore the event for the prefix.
 	 */
 	if (BGP_INSTANCE_HIDDEN_DELETE_IN_PROGRESS(bgp, afi, safi)) {
-		if (dest)
+		if (dest) {
 			debug = bgp_debug_bestpath(dest);
+			UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
+		}
 		if (debug) {
 			dv = bgp_dest_debug_vrf(dest);
 			zlog_debug(
@@ -4469,6 +4471,7 @@ void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, saf
 		if (BGP_DEBUG(update, UPDATE_OUT))
 			zlog_debug("SELECT_DEFER flag set for route %p(%s)",
 				   dest, bgp->name_pretty);
+		UNSET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
 		return;
 	}
 
@@ -4686,7 +4689,7 @@ void bgp_process_main_one(struct bgp *bgp, struct bgp_dest *dest, afi_t afi, saf
 	 * Find if this prefix falls under any aggregate with UPA enabled.
 	 * If so, dynamically originate/withdraw UPA based on reachability.
 	 */
-	bgp_upa_check_prefix_aggregates(bgp, bgp_dest_get_prefix(dest), afi, safi, new_select);
+	bgp_upa_check_prefix_aggregates(bgp, dest, afi, safi, new_select);
 
 	return;
 }
@@ -5471,6 +5474,8 @@ static void bgp_process_internal(struct bgp *bgp, struct bgp_dest *dest,
 				 struct bgp_path_info *pi, afi_t afi,
 				 safi_t safi, bool early_process)
 {
+	int ret;
+
 	/*
 	 * Indicate that *this* pi is in an unsorted
 	 * situation, even if the node is already
@@ -5519,21 +5524,25 @@ static void bgp_process_internal(struct bgp *bgp, struct bgp_dest *dest,
 		early_process = true;
 	}
 
+	if (early_process)
+		ret = early_route_process(bgp, dest);
+	else
+		ret = other_route_process(bgp, dest);
+
+	/* Take the queue's references only once dest is actually enqueued. */
+	if (ret < 0)
+		return;
+
 	/* all unlocked in process_subq_xxx functions */
 	bgp_table_lock(bgp_dest_table(dest));
 
 	SET_FLAG(dest->flags, BGP_NODE_PROCESS_SCHEDULED);
 	bgp_dest_lock_node(dest);
 
-	if (early_process) {
+	if (early_process)
 		SET_FLAG(dest->flags, BGP_NODE_ZEBRA_ANNOUNCE_EARLY);
-		early_route_process(bgp, dest);
-	} else {
+	else
 		UNSET_FLAG(dest->flags, BGP_NODE_ZEBRA_ANNOUNCE_EARLY);
-		other_route_process(bgp, dest);
-	}
-
-	return;
 }
 
 void bgp_process(struct bgp *bgp, struct bgp_dest *dest,
@@ -10300,23 +10309,17 @@ void bgp_upa_withdraw_global(struct bgp *bgp, afi_t afi, safi_t safi)
 		zlog_debug("UPA: Global withdrawal complete: %u withdrawn", withdrawn);
 }
 
-static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, const struct prefix *p, afi_t afi,
+static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, struct bgp_dest *dest, afi_t afi,
 					    safi_t safi, struct bgp_path_info *new_select)
 {
+	const struct prefix *p = bgp_dest_get_prefix(dest);
 	struct bgp_table *table;
-	struct bgp_dest *aggr_dest, *dest;
+	struct bgp_dest *aggr_dest;
 	struct bgp_aggregate *aggregate;
 	const struct prefix *aggr_prefix;
 
-	if (!bgp || !p)
-		return;
-
 	table = bgp->aggregate[afi][safi];
-	if (!table)
-		return;
-
-	dest = bgp_node_get(bgp->rib[afi][safi], p);
-	if (!dest)
+	if (!table || !bgp_table_top_nolock(table))
 		return;
 
 	for (aggr_dest = bgp_table_top(table); aggr_dest; aggr_dest = bgp_route_next(aggr_dest)) {
@@ -10378,8 +10381,6 @@ static void bgp_upa_check_prefix_aggregates(struct bgp *bgp, const struct prefix
 				bgp_upa_untrack_route(aggregate, p);
 		}
 	}
-
-	bgp_dest_unlock_node(dest);
 }
 
 /*
@@ -13898,7 +13899,7 @@ void route_vty_out_detail(struct vty *vty, struct bgp *bgp, struct bgp_dest *bn,
 	if (attr->aspath) {
 		if (json_paths) {
 			if (!attr->aspath->json)
-				aspath_str_update(attr->aspath, true);
+				aspath_json_update(attr->aspath);
 			json_object_lock(attr->aspath->json);
 			json_object_object_add(json_path, "aspath",
 					       attr->aspath->json);
@@ -14502,17 +14503,17 @@ skip_nexthop:
 	if (bgp_attr_exists(attr, BGP_ATTR_COMMUNITIES)) {
 		if (json_paths) {
 			if (!bgp_attr_get_community(attr)->json)
-				community_str(bgp_attr_get_community(attr),
-					      true, true);
+				community_str(bgp_attr_get_community(attr), true);
 			json_object_lock(bgp_attr_get_community(attr)->json);
 			json_object_object_add(
 				json_path, "community",
 				bgp_attr_get_community(attr)->json);
 		} else {
-			if (!bgp_attr_get_community(attr)->str)
-				community_str(bgp_attr_get_community(attr), true, true);
-			vty_out(vty, "      Community: %s\n",
-				bgp_attr_get_community(attr)->str);
+			char *str = bgp_community2alias_str(
+				community_str(bgp_attr_get_community(attr), false));
+
+			vty_out(vty, "      Community: %s\n", str);
+			XFREE(MTYPE_TMP, str);
 		}
 	}
 
@@ -14556,17 +14557,17 @@ skip_nexthop:
 	if (bgp_attr_exists(attr, BGP_ATTR_LARGE_COMMUNITIES)) {
 		if (json_paths) {
 			if (!bgp_attr_get_lcommunity(attr)->json)
-				lcommunity_str(bgp_attr_get_lcommunity(attr),
-					       true, true);
+				lcommunity_str(bgp_attr_get_lcommunity(attr), true);
 			json_object_lock(bgp_attr_get_lcommunity(attr)->json);
 			json_object_object_add(
 				json_path, "largeCommunity",
 				bgp_attr_get_lcommunity(attr)->json);
 		} else {
-			if (!bgp_attr_get_lcommunity(attr)->str)
-				lcommunity_str(bgp_attr_get_lcommunity(attr), true, true);
-			vty_out(vty, "      Large Community: %s\n",
-				bgp_attr_get_lcommunity(attr)->str);
+			char *str = bgp_community2alias_str(
+				lcommunity_str(bgp_attr_get_lcommunity(attr), false));
+
+			vty_out(vty, "      Large Community: %s\n", str);
+			XFREE(MTYPE_TMP, str);
 		}
 	}
 

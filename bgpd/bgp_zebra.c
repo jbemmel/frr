@@ -55,6 +55,7 @@
 #include "bgpd/bgp_trace.h"
 #include "bgpd/bgp_community.h"
 #include "bgpd/bgp_lcommunity.h"
+#include "bgpd/bgp_community_alias.h"
 #include "bgpd/bgp_srv6.h"
 #include "bgpd/bgp_ls.h"
 #include "bgpd/bgp_ls_ted.h"
@@ -1653,6 +1654,15 @@ enum zclient_send_status bgp_zebra_announce_actual(struct bgp_dest *dest,
 					 table->safi, &nhg_id, &metric, &tag, &allow_recursion,
 					 do_wt_ecmp);
 
+	/*
+	 * No usable nexthop is left (e.g. the table-map denied every path).
+	 * Withdraw the route instead of sending an ADD without nexthops:
+	 * zebra rejects such an ADD, logs a warning and keeps the previously
+	 * installed route, which then stays stale in the RIB/FIB.
+	 */
+	if (!valid_nh_count && !nhg_id)
+		return bgp_zebra_withdraw_actual(dest, info, bgp);
+
 	if (do_wt_ecmp == BGP_WECMP_BEHAVIOR_USE_RECURSIVE_VALUE)
 		SET_FLAG(api.flags, ZEBRA_FLAG_USE_RECURSIVE_WEIGHT);
 
@@ -1664,15 +1674,21 @@ enum zclient_send_status bgp_zebra_announce_actual(struct bgp_dest *dest,
 		strlcpy(bzo.aspath, info->attr->aspath->str,
 			sizeof(bzo.aspath));
 
-		if (bgp_attr_exists(info->attr, BGP_ATTR_COMMUNITIES))
-			strlcpy(bzo.community,
-				bgp_attr_get_community(info->attr)->str,
-				sizeof(bzo.community));
+		if (bgp_attr_exists(info->attr, BGP_ATTR_COMMUNITIES)) {
+			char *str =
+				bgp_community2alias_str(bgp_attr_get_community(info->attr)->str);
 
-		if (bgp_attr_exists(info->attr, BGP_ATTR_LARGE_COMMUNITIES))
-			strlcpy(bzo.lcommunity,
-				bgp_attr_get_lcommunity(info->attr)->str,
-				sizeof(bzo.lcommunity));
+			strlcpy(bzo.community, str, sizeof(bzo.community));
+			XFREE(MTYPE_TMP, str);
+		}
+
+		if (bgp_attr_exists(info->attr, BGP_ATTR_LARGE_COMMUNITIES)) {
+			char *str =
+				bgp_community2alias_str(bgp_attr_get_lcommunity(info->attr)->str);
+
+			strlcpy(bzo.lcommunity, str, sizeof(bzo.lcommunity));
+			XFREE(MTYPE_TMP, str);
+		}
 
 		strlcpy(bzo.selection_reason, reason,
 			sizeof(bzo.selection_reason));
