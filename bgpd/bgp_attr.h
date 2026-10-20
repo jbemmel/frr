@@ -440,6 +440,7 @@ extern struct attr *bgp_attr_aggregate_intern(
 	struct community *community, struct ecommunity *ecommunity,
 	struct lcommunity *lcommunity, struct bgp_aggregate *aggregate,
 	uint8_t atomic_aggregate, const struct prefix *p);
+extern void bgp_peer_prepend_local_as(struct peer *peer, afi_t afi, safi_t safi, struct attr *attr);
 extern bgp_size_t
 bgp_packet_attribute(struct bgp *bgp, struct peer *peer, struct stream *s, struct attr *attr,
 		     struct bpacket_attr_vec_arr *vecarr, struct prefix *p, afi_t afi, safi_t safi,
@@ -464,6 +465,8 @@ extern enum bgp_attr_parse_ret bgp_attr_ignore(struct peer *peer, uint8_t type);
 /* Cluster list prototypes. */
 extern bool cluster_loop_check(struct cluster_list *cluster,
 			       struct in_addr originator);
+extern void bgp_attr_prepend_cluster_id(struct bgp *bgp, struct attr *attr);
+extern void bgp_attr_clear_reflection(struct attr *attr);
 
 /* Below exported for unit-test purposes only */
 struct bgp_attr_parser_args {
@@ -775,6 +778,21 @@ static inline void bgp_attr_set_cluster(struct attr *attr,
 		bgp_attr_set(attr, BGP_ATTR_CLUSTER_LIST);
 	else
 		bgp_attr_unset(attr, BGP_ATTR_CLUSTER_LIST);
+}
+
+static inline struct in_addr bgp_attr_get_originator_id(const struct attr *attr)
+{
+	return attr->originator_id;
+}
+
+static inline void bgp_attr_set_originator_id(struct attr *attr, struct in_addr originator_id)
+{
+	attr->originator_id = originator_id;
+
+	if (originator_id.s_addr != INADDR_ANY)
+		bgp_attr_set(attr, BGP_ATTR_ORIGINATOR_ID);
+	else
+		bgp_attr_unset(attr, BGP_ATTR_ORIGINATOR_ID);
 }
 
 static inline struct bgp_route_evpn *

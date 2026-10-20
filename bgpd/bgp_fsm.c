@@ -951,6 +951,15 @@ void bgp_start_tier2_deferral_timer(struct bgp *bgp, afi_t afi, safi_t safi)
 	event_add_timer(bm->master, bgp_graceful_deferral_timer_expire, thread_info,
 			bgp->select_defer_time, &gr_info->t_select_deferral_tier2);
 
+	/*
+	 * This stage is open again. A previous cycle can leave
+	 * select_defer_over_tier2 set, which makes
+	 * BGP_GR_SELECT_DEFER_DONE() true as soon as directly connected
+	 * peers finish and sends UPDATE_COMPLETE before the multihop
+	 * End-of-RIB.
+	 */
+	gr_info->select_defer_over_tier2 = false;
+	gr_info->route_sync_tier2 = false;
 	gr_info->select_defer_tier2_required = true;
 
 	if (BGP_DEBUG(graceful_restart, GRACEFUL_RESTART))
@@ -1843,6 +1852,32 @@ static void bgp_start_deferral_timer(struct bgp *bgp, afi_t afi, safi_t safi,
 {
 	struct afi_safi_info *thread_info;
 
+	/*
+	 * Arming this timer opens a selection-deferral cycle. The first
+	 * cycle leaves select_defer_over set, so a later End-of-RIB skips
+	 * bgp_gr_check_path_select() and routes stay unsorted until this
+	 * timer expires. route_sync* must be cleared too, or zebra never
+	 * gets the matching UPDATE_COMPLETE.
+	 *
+	 * A previous cycle can also leave the tier-2 timer running, with
+	 * select_defer_over_tier2 and select_defer_tier2_required still
+	 * set. That callback carries no cycle id, so it would mark this
+	 * cycle complete and zebra would get UPDATE_COMPLETE before the
+	 * new multihop End-of-RIB. Cancel the timer and drop its flags.
+	 */
+	if (event_is_scheduled(gr_info->t_select_deferral_tier2)) {
+		void *info = EVENT_ARG(gr_info->t_select_deferral_tier2);
+
+		XFREE(MTYPE_TMP, info);
+	}
+	event_cancel(&gr_info->t_select_deferral_tier2);
+
+	gr_info->select_defer_over = false;
+	gr_info->select_defer_over_tier2 = false;
+	gr_info->select_defer_tier2_required = false;
+	gr_info->route_sync = false;
+	gr_info->route_sync_tier2 = false;
+
 	/* Start the timer */
 	thread_info = XMALLOC(MTYPE_TMP, sizeof(struct afi_safi_info));
 
@@ -2396,15 +2431,9 @@ bgp_stop_with_error(struct peer_connection *connection)
 }
 
 
-/* something went wrong, send notify and tear down */
-enum bgp_fsm_state_progress
-bgp_stop_with_notify(struct peer_connection *connection, uint8_t code,
-		     uint8_t sub_code)
+static enum bgp_fsm_state_progress bgp_stop_without_notify(struct peer_connection *connection)
 {
 	struct peer *peer = connection->peer;
-
-	/* Send notify to remote peer */
-	bgp_notify_send(connection, code, sub_code);
 
 	if (peer_dynamic_neighbor_no_nsf(peer)) {
 		if (bgp_debug_neighbor_events(peer))
@@ -2419,6 +2448,14 @@ bgp_stop_with_notify(struct peer_connection *connection, uint8_t code,
 	peer->v_start = BGP_INIT_START_TIMER;
 
 	return bgp_stop(connection);
+}
+
+enum bgp_fsm_state_progress bgp_stop_with_notify(struct peer_connection *connection, uint8_t code,
+						 uint8_t sub_code)
+{
+	bgp_notify_send(connection, code, sub_code);
+
+	return bgp_stop_without_notify(connection);
 }
 
 /**
@@ -2804,19 +2841,63 @@ bgp_fsm_open(struct peer_connection *connection)
 	return BGP_FSM_SUCCESS;
 }
 
+/*
+ * The type of the received message that raised the event.  Returns false for
+ * an event that was not raised by a received message.
+ */
+static bool bgp_fsm_event_msg_type(enum bgp_fsm_events event, uint8_t *type)
+{
+	switch (event) {
+	case Receive_OPEN_message:
+		*type = BGP_MSG_OPEN;
+		return true;
+	case Receive_KEEPALIVE_message:
+		*type = BGP_MSG_KEEPALIVE;
+		return true;
+	case Receive_UPDATE_message:
+		*type = BGP_MSG_UPDATE;
+		return true;
+	case Receive_NOTIFICATION_message:
+		*type = BGP_MSG_NOTIFY;
+		return true;
+	case BGP_Start:
+	case BGP_Stop:
+	case TCP_connection_open:
+	case TCP_connection_open_w_delay:
+	case TCP_connection_closed:
+	case TCP_connection_open_failed:
+	case TCP_fatal_error:
+	case ConnectRetry_timer_expired:
+	case Hold_Timer_expired:
+	case KeepAlive_timer_expired:
+	case DelayOpen_timer_expired:
+	case Clearing_Completed:
+	case BGP_EVENTS_MAX:
+		break;
+	}
+
+	return false;
+}
+
 /* FSM error, unexpected event.  This is error of BGP connection. So cut the
    peer and change to Idle status. */
 static enum bgp_fsm_state_progress
 bgp_fsm_event_error(struct peer_connection *connection)
 {
 	struct peer *peer = connection->peer;
+	uint8_t type;
 
 	flog_err(EC_BGP_FSM, "%s [FSM] unexpected packet received in state %s",
 		 peer->host,
 		 lookup_msg(bgp_status_msg, connection->status, NULL));
 
-	return bgp_stop_with_notify(connection, BGP_NOTIFY_FSM_ERR,
-				    bgp_fsm_error_subcode(connection->status));
+	if (!bgp_fsm_event_msg_type(peer->cur_event, &type))
+		return bgp_stop_with_notify(connection, BGP_NOTIFY_FSM_ERR,
+					    bgp_fsm_error_subcode(connection->status));
+
+	bgp_notify_send_fsm_error(connection, type);
+
+	return bgp_stop_without_notify(connection);
 }
 
 /* Hold timer expire.  This is error of BGP connection. So cut the

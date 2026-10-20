@@ -197,6 +197,49 @@ static void cluster_unintern(struct cluster_list **cluster)
 	}
 }
 
+/* Prepend cluster_id to cluster list for route reflection */
+void bgp_attr_prepend_cluster_id(struct bgp *bgp, struct attr *attr)
+{
+	struct cluster_list *cluster = bgp_attr_get_cluster(attr);
+	struct in_addr cluster_id;
+	int new_length;
+	struct cluster_list *new_cluster;
+
+	/* Determine our cluster_id */
+	if (CHECK_FLAG(bgp->config, BGP_CONFIG_CLUSTER_ID))
+		cluster_id = bgp->cluster_id;
+	else
+		cluster_id = bgp->router_id;
+
+	/* Calculate new length: existing length + 4 bytes for cluster_id */
+	new_length = cluster ? cluster->length + 4 : 4;
+
+	/* Allocate new cluster list structure */
+	new_cluster = XCALLOC(MTYPE_CLUSTER, sizeof(struct cluster_list));
+	new_cluster->length = new_length;
+	new_cluster->list = XMALLOC(MTYPE_CLUSTER_VAL, new_length);
+
+	/* Prepend our cluster_id */
+	memcpy(new_cluster->list, &cluster_id, sizeof(struct in_addr));
+
+	/* Append existing cluster list if present */
+	if (cluster && cluster->length > 0)
+		memcpy((uint8_t *)new_cluster->list + sizeof(struct in_addr), cluster->list,
+		       cluster->length);
+
+	/* Set the new cluster in attr (will be interned later by bgp_attr_intern) */
+	bgp_attr_set_cluster(attr, new_cluster);
+}
+
+/* Clear route reflection attributes (originator-id and cluster-list) */
+void bgp_attr_clear_reflection(struct attr *attr)
+{
+	if (bgp_attr_exists(attr, BGP_ATTR_ORIGINATOR_ID))
+		bgp_attr_set_originator_id(attr, (struct in_addr){ INADDR_ANY });
+	if (bgp_attr_get_cluster(attr))
+		bgp_attr_set_cluster(attr, NULL);
+}
+
 static void cluster_init(void)
 {
 	cluster_hash = hash_create(cluster_hash_key_make, cluster_hash_cmp,
@@ -1378,8 +1421,7 @@ static void attr_show_all_iterator(struct hash_bucket *bucket, void *args[])
 		attr->nh_ifindex, attr->nh_flags, attr->distance, &attr->mp_nexthop_global,
 		&attr->mp_nexthop_local, attr->nh_lla_ifindex);
 	vty_out(vty, "\taspath: %s Community: %s Large Community: %s\n", aspath_print(attr->aspath),
-		community_str(attr->community, false, false),
-		lcommunity_str(attr->lcommunity, false, false));
+		community_str(attr->community, false), lcommunity_str(attr->lcommunity, false));
 	vty_out(vty, "\tExtended Community: %s Extended IPv6 Community: %s\n",
 		ecommunity_str(attr->ecommunity),
 		ecommunity_str(bgp_attr_get_ipv6_ecommunity(attr)));
@@ -3719,6 +3761,15 @@ static enum bgp_attr_parse_ret bgp_attr_srv6_service(struct bgp_attr_parser_args
 		size_t start;
 		size_t consumed;
 
+		/* We already processed an SID Information Sub-TLV. RFC 9252 says
+		 * that when multiple instances are present, the ingress PE SHOULD use
+		 * the SID from the first, so ignore this subsequent instance.
+		 */
+		if (bgp_attr_get_srv6_l3service(attr)) {
+			stream_forward_getp(connection->curr, length);
+			return BGP_ATTR_PARSE_PROCEED;
+		}
+
 		if (length < BGP_PREFIX_SID_SRV6_L3_SERVICE_SID_INFO_LENGTH) {
 			flog_err(EC_BGP_ATTR_LEN,
 				 "Malformed SRv6 Service Sub-TLV attribute - declared length %u is less than minimum %d",
@@ -3741,13 +3792,6 @@ static enum bgp_attr_parse_ret bgp_attr_srv6_service(struct bgp_attr_parser_args
 				   __func__, &ipv6_sid, sid_flags, endpoint_behavior);
 
 		/* Configure from Info */
-		if (bgp_attr_get_srv6_l3service(attr)) {
-			flog_err(EC_BGP_ATTRIBUTE_REPEATED,
-				 "Prefix SID SRv6 L3 Service field repeated");
-			return bgp_attr_malformed(
-				args, BGP_NOTIFY_UPDATE_MAL_ATTR, args->total);
-		}
-
 		struct bgp_attr_srv6_l3service *srv6_l3service =
 			XCALLOC(MTYPE_BGP_SRV6_L3SERVICE, sizeof(struct bgp_attr_srv6_l3service));
 
@@ -5735,6 +5779,70 @@ static bool bgp_append_local_as(struct peer *peer, afi_t afi, safi_t safi)
 	return false;
 }
 
+/*
+ * Prepend the local-as, if appropriate, to the outbound as-path in
+ * the adj_out attribute.
+ */
+void bgp_peer_prepend_local_as(struct peer *peer, afi_t afi, safi_t safi, struct attr *attr)
+{
+	struct aspath *aspath;
+	struct bgp *bgp = peer->bgp;
+
+	/* If remote-peer is EBGP */
+	if (peer->sort == BGP_PEER_EBGP &&
+	    (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_AS_PATH_UNCHANGED) ||
+	     attr->aspath->segments == NULL) &&
+	    (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_RSERVER_CLIENT))) {
+		aspath = aspath_dup(attr->aspath);
+
+		/* Even though we may not be configured for confederations we may
+		 * have RXed an AS_PATH with AS_CONFED_SEQUENCE or AS_CONFED_SET.
+		 */
+		aspath = aspath_delete_confed_seq(aspath);
+
+		if (CHECK_FLAG(bgp->config, BGP_CONFIG_CONFEDERATION)) {
+			/* A confed member, so we need to do the
+			 * AS_CONFED_SEQUENCE thing if it's outside a common
+			 * administration.
+			 * Configured confederation peers MUST be validated
+			 * under BGP_PEER_CONFED, but if we have configured
+			 * remote-as as AS_EXTERNAL, we need to check again
+			 * if the peer belongs to us.
+			 */
+			if (bgp_confederation_peers_check(bgp, peer->as)) {
+				aspath = aspath_add_confed_seq(aspath, peer->local_as);
+			} else {
+				/* Stuff our path CONFED_ID on the front */
+				aspath = aspath_add_seq(aspath, bgp->confed_id);
+			}
+		} else {
+			if (peer->change_local_as) {
+				/* If replace-as is specified, we only use the
+				 * change_local_as when advertising routes.
+				 */
+				if (!CHECK_FLAG(peer->flags, PEER_FLAG_LOCAL_AS_REPLACE_AS))
+					if (bgp_append_local_as(peer, afi, safi))
+						aspath = aspath_add_seq(aspath, peer->local_as);
+				aspath = aspath_add_seq(aspath, peer->change_local_as);
+			} else {
+				aspath = aspath_add_seq(aspath, peer->local_as);
+			}
+		}
+	} else if (peer->sort == BGP_PEER_CONFED) {
+		/* A confed member, so we need to do the AS_CONFED_SEQUENCE */
+		aspath = aspath_dup(attr->aspath);
+		aspath = aspath_add_confed_seq(aspath, peer->local_as);
+	} else
+		aspath = attr->aspath;
+
+	if (aspath != attr->aspath) {
+		/* Free old aspath if not interned (refcnt==0) */
+		if (attr->aspath && attr->aspath->refcnt == 0)
+			aspath_free(attr->aspath);
+		attr->aspath = aspath;
+	}
+}
+
 static void bgp_packet_ecommunity_attribute(struct stream *s, struct peer *peer, struct attr *attr,
 					    struct ecommunity *ecomm, int attribute)
 {
@@ -5809,84 +5917,23 @@ bgp_size_t bgp_packet_attribute(struct bgp *bgp, struct peer *peer, struct strea
 	stream_putc(s, 1);
 	stream_putc(s, attr->origin);
 
-	/* AS path attribute. */
-
 	/*
-	 * The for_bmp path is taken from bmp_update(), which only ever feeds
-	 * in attributes that come from receive-side storage in the three BMP
-	 * modes FRR currently emits:
+	 * AS path attribute.
 	 *
-	 *   - pre-policy Adj-RIB-In:   adjin->attr (raw on-wire from peer)
-	 *   - post-policy Adj-RIB-In:  bpi->attr   (path-info in local RIB)
-	 *   - Loc-RIB:                 bpi->attr   (selected best path)
+	 * Callers must supply the final outbound AS_PATH in attr->aspath.
+	 * The peer-specific transformations (local-AS prepend for eBGP,
+	 * confed-seq, change-local-as) are applied earlier by the caller
+	 * via bgp_peer_prepend_local_as() before invoking this function.
 	 *
-	 * None of these have been through the outbound peer-specific AS_PATH
-	 * transformations below (local-AS prepend for eBGP, confed-seq,
-	 * change-local-as), so they're skipped when for_bmp is set.
+	 * For BMP, bmp_update() feeds receive-side attributes (adjin->attr
+	 * or bpi->attr) which have not been through outbound transformations,
+	 * and that is correct for Adj-RIB-In and Loc-RIB monitoring.
 	 *
 	 * If RFC 8671 Adj-RIB-Out monitoring is added, post-policy
 	 * Adj-RIB-Out MUST be encoded "as actually transmitted to the peer"
-	 * (RFC 8671 §5.1) — that future caller must invoke this function
-	 * with for_bmp=false so the transformations below run.
+	 * (RFC 8671 S5.1) - that caller must prepare the path beforehand.
 	 */
-	/* If remote-peer is EBGP */
-	if (!for_bmp && peer->sort == BGP_PEER_EBGP &&
-	    (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_AS_PATH_UNCHANGED) ||
-	     attr->aspath->segments == NULL) &&
-	    (!CHECK_FLAG(peer->af_flags[afi][safi], PEER_FLAG_RSERVER_CLIENT))) {
-		aspath = aspath_dup(attr->aspath);
-
-		/* Even though we may not be configured for confederations we
-		 * may have
-		 * RXed an AS_PATH with AS_CONFED_SEQUENCE or AS_CONFED_SET */
-		aspath = aspath_delete_confed_seq(aspath);
-
-		if (CHECK_FLAG(bgp->config, BGP_CONFIG_CONFEDERATION)) {
-			/* A confed member, so we need to do the
-			 * AS_CONFED_SEQUENCE thing if it's outside a common
-			 * administration.
-			 * Configured confederation peers MUST be validated
-			 * under BGP_PEER_CONFED, but if we have configured
-			 * remote-as as AS_EXTERNAL, we need to check again
-			 * if the peer belongs to us.
-			 */
-			if (bgp_confederation_peers_check(bgp, peer->as)) {
-				aspath = aspath_add_confed_seq(aspath,
-							       peer->local_as);
-			} else {
-				/* Stuff our path CONFED_ID on the front */
-				aspath = aspath_add_seq(aspath, bgp->confed_id);
-			}
-		} else {
-			if (peer->change_local_as) {
-				/* If replace-as is specified, we only use the
-				   change_local_as when
-				   advertising routes. */
-				if (!CHECK_FLAG(peer->flags,
-						PEER_FLAG_LOCAL_AS_REPLACE_AS))
-					if (bgp_append_local_as(peer, afi,
-								safi))
-						aspath = aspath_add_seq(
-							aspath, peer->local_as);
-				aspath = aspath_add_seq(aspath,
-							peer->change_local_as);
-			} else {
-				aspath = aspath_add_seq(aspath, peer->local_as);
-			}
-		}
-	} else if (!for_bmp && peer->sort == BGP_PEER_CONFED) {
-		/* A confed member, so we need to do the AS_CONFED_SEQUENCE
-		 * thing */
-		aspath = aspath_dup(attr->aspath);
-		aspath = aspath_add_confed_seq(aspath, peer->local_as);
-	} else
-		/*
-		 * NOTE: with for_bmp=true we always reach here, including for
-		 * confed peers — the confed-seq above is intentionally
-		 * skipped. See the for_bmp commentary above the EBGP block for
-		 * the rationale and the RFC 8671 Adj-RIB-Out caveat.
-		 */
-		aspath = attr->aspath;
+	aspath = attr->aspath;
 
 	/* If peer is not AS4 capable, then:
 	 * - send the created AS_PATH out as AS4_PATH (optional, transitive),
@@ -6063,54 +6110,28 @@ bgp_size_t bgp_packet_attribute(struct bgp *bgp, struct peer *peer, struct strea
 			   lcom_length(bgp_attr_get_lcommunity(attr)));
 	}
 
-	/* Route Reflector. */
-	if (peer->sort == BGP_PEER_IBGP && from
-	    && from->sort == BGP_PEER_IBGP) {
-		struct cluster_list *cluster = bgp_attr_get_cluster(attr);
-
-		/* Originator ID. */
+	/* Originator ID. */
+	if (bgp_attr_exists(attr, BGP_ATTR_ORIGINATOR_ID)) {
 		stream_putc(s, BGP_ATTR_FLAG_OPTIONAL);
 		stream_putc(s, BGP_ATTR_ORIGINATOR_ID);
 		stream_putc(s, 4);
+		stream_put_in_addr(s, &attr->originator_id);
+	}
 
-		if (bgp_attr_exists(attr, BGP_ATTR_ORIGINATOR_ID))
-			stream_put_in_addr(s, &attr->originator_id);
-		else
-			stream_put_in_addr(s, &from->remote_id);
+	/* Cluster list. */
+	if (bgp_attr_exists(attr, BGP_ATTR_CLUSTER_LIST)) {
+		struct cluster_list *cluster = bgp_attr_get_cluster(attr);
 
-		/* Cluster list. */
-		/* RFC 4271 4.3 says:
-		 * The fourth high-order bit (bit 3) of the Attribute Flags octet
-		 * is the Extended Length bit. It defines whether the Attribute
-		 * Length is one octet (if set to 0) or two octets (if set to 1).
-		 *
-		 * If the Extended Length bit of the Attribute Flags octet is set
-		 * to 0, the third octet of the Path Attribute contains the length
-		 * of the attribute data in octets.
-		 *
-		 * If the Extended Length bit of the Attribute Flags octet is set
-		 * to 1, the third and fourth octets of the path attribute contain
-		 * the length of the attribute data in octets.
-		 */
-		if (cluster && cluster->length + 4 > 255) {
+		if (cluster->length > 255) {
 			stream_putc(s, BGP_ATTR_FLAG_OPTIONAL | BGP_ATTR_FLAG_EXTLEN);
 			stream_putc(s, BGP_ATTR_CLUSTER_LIST);
-			stream_putw(s, cluster->length + 4);
+			stream_putw(s, cluster->length);
 		} else {
 			stream_putc(s, BGP_ATTR_FLAG_OPTIONAL);
 			stream_putc(s, BGP_ATTR_CLUSTER_LIST);
-			stream_putc(s, cluster ? cluster->length + 4 : 4);
+			stream_putc(s, cluster->length);
 		}
-
-		/* If this peer configuration's parent BGP has
-		 * cluster_id. */
-		if (CHECK_FLAG(bgp->config, BGP_CONFIG_CLUSTER_ID))
-			stream_put_in_addr(s, &bgp->cluster_id);
-		else
-			stream_put_in_addr(s, &bgp->router_id);
-
-		if (cluster)
-			stream_put(s, cluster->list, cluster->length);
+		stream_put(s, cluster->list, cluster->length);
 	}
 
 	/* Extended IPv6/Communities attributes. */
