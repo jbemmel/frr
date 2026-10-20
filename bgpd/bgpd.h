@@ -3408,7 +3408,7 @@ extern int bgp_lookup_by_as_name_type(struct bgp **bgp_val, as_t *as, const char
 /* Hooks */
 DECLARE_HOOK(bgp_vrf_status_changed, (struct bgp *bgp, struct interface *ifp),
 	     (bgp, ifp));
-DECLARE_HOOK(peer_status_changed, (struct peer *peer), (peer));
+DECLARE_HOOK(peer_status_changed, (struct peer_connection *connection), (connection));
 DECLARE_HOOK(bgp_snmp_init_stats, (struct bgp *bgp), (bgp));
 DECLARE_HOOK(bgp_snmp_update_last_changed, (struct bgp *bgp), (bgp));
 DECLARE_HOOK(bgp_snmp_update_stats,
@@ -3419,6 +3419,11 @@ DECLARE_HOOK(bgp_rpki_prefix_status,
 	      const struct prefix *prefix),
 	     (peer, attr, prefix));
 DECLARE_HOOK(bgp_rpki_connection_status, (const char *vrf_name), (vrf_name));
+DECLARE_HOOK(bgp_aspa_path_status, (struct peer *peer, struct attr *attr, int direction),
+	     (peer, attr, direction));
+
+#define BGP_ASPA_UPSTREAM   0
+#define BGP_ASPA_DOWNSTREAM 1
 
 void peer_nsf_stop(struct peer *peer);
 

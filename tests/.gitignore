@@ -4,6 +4,7 @@
 frr-northbound.proto
 frr_northbound*
 .pytest_cache
+/bgpd/test_allowas_rmap
 /bgpd/test_aspath
 /bgpd/test_attr_parse
 /bgpd/test_bgp_table
@@ -30,6 +31,8 @@ frr_northbound*
 /lib/cxxcompat
 /lib/fuzz_zlog
 /lib/test_assert
+/lib/test_atomhash_fast
+/lib/test_atomhash_slow
 /lib/test_atomlist
 /lib/test_buffer
 /lib/test_checksum
@@ -61,6 +64,7 @@ frr_northbound*
 /lib/test_skiplist
 /lib/test_srcdest_table
 /lib/test_stream
+/lib/test_stream_expand
 /lib/test_table
 /lib/test_timer_correctness
 /lib/test_timer_performance

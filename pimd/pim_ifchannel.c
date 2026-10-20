@@ -153,6 +153,9 @@ void pim_ifchannel_delete(struct pim_ifchannel *origch)
 		 * needs to be done here
 		 */
 		pim_ifchannel_find(ifp, &origch->sg, &ch, &chrpt);
+		/* origch is still in the tree; the RPT prune being deleted must not veto */
+		if (chrpt == origch)
+			chrpt = NULL;
 		if (parent && pim_upstream_evaluate_join_desired_interface(up, ch, chrpt, parent))
 			pim_channel_add_oif(up->channel_oil, ifp, PIM_OIF_FLAG_PROTO_STAR,
 					    __func__);
@@ -1256,8 +1259,8 @@ int pim_ifchannel_local_membership_add(struct interface *ifp, pim_sgaddr *sg,
 
 		if (pim->spt.switchover == PIM_SPT_INFINITY) {
 			if (pim->spt.plist) {
-				struct prefix_list *plist = prefix_list_lookup(
-					AFI_IP, pim->spt.plist);
+				struct prefix_list *plist = prefix_list_lookup(PIM_AFI,
+									       pim->spt.plist);
 				struct prefix g;
 
 				pim_addr_to_prefix(&g, up->sg.grp);

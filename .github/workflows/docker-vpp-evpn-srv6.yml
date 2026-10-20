@@ -52,6 +52,7 @@ jobs:
         id: sources
         env:
           OWNER: ${{ github.repository_owner }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           VPP_REF: ${{ inputs.vpp_ref || 'feature/linux-cp-srv6-route-sync' }}
           EVPN_REF: ${{ inputs.evpn_ref || 'feature/ipv6-dual-stack' }}
         run: |
@@ -68,13 +69,19 @@ jobs:
             fi
             printf '%s\n' "$commit"
           }
-          echo "image=ghcr.io/${OWNER,,}/frr-vpp-evpn-srv6" >> "$GITHUB_OUTPUT"
+          image="ghcr.io/${OWNER,,}/frr-vpp-evpn-srv6"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          cache_branch=$(printf '%s' "$GITHUB_REF" | sha256sum | cut -c1-16)
+          cache_default=$(printf 'refs/heads/%s' "$DEFAULT_BRANCH" | sha256sum | cut -c1-16)
+          echo "cache=$image:buildcache-$cache_branch" >> "$GITHUB_OUTPUT"
+          echo "cache_default=$image:buildcache-$cache_default" >> "$GITHUB_OUTPUT"
           vpp_commit=$(resolve_commit https://github.com/jbemmel/vpp.git "$VPP_REF")
           evpn_commit=$(resolve_commit https://github.com/exergy-connect/vpp-evpn-plugin.git "$EVPN_REF")
           echo "vpp_commit=$vpp_commit" >> "$GITHUB_OUTPUT"
           echo "evpn_commit=$evpn_commit" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
@@ -94,6 +101,29 @@ jobs:
             type=ref,event=branch
             type=sha,prefix=sha-,format=long
 
+      # Layer exports do not include RUN cache mounts. Restore compiler caches
+      # explicitly, then extract them in the action's post step before cache save.
+      - name: Restore compiler caches
+        id: compiler-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ runner.temp }}/compiler-cache
+          key: ${{ runner.os }}-${{ runner.arch }}-vpp-evpn-ccache-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-vpp-evpn-ccache-v1-
+
+      - name: Inject compiler caches into BuildKit
+        uses: reproducible-containers/buildkit-cache-dance@ded252aa2d35e81253b20a908e60de5edade706a # v3.3.1
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          scratch-dir: ${{ runner.temp }}/buildkit-cache-dance
+          cache-map: |
+            {
+              "${{ runner.temp }}/compiler-cache/vpp": "/var/cache/ccache/vpp",
+              "${{ runner.temp }}/compiler-cache/evpn": "/var/cache/ccache/evpn",
+              "${{ runner.temp }}/compiler-cache/frr": "/var/cache/ccache/frr"
+            }
+
       - name: Build and publish
         uses: docker/build-push-action@v7
         with:
@@ -109,5 +139,7 @@ jobs:
             EVPN_REF=${{ inputs.evpn_ref || 'feature/ipv6-dual-stack' }}
             VPP_COMMIT=${{ steps.sources.outputs.vpp_commit }}
             EVPN_COMMIT=${{ steps.sources.outputs.evpn_commit }}
-          cache-from: type=gha,scope=frr-vpp-evpn-srv6
-          cache-to: type=gha,scope=frr-vpp-evpn-srv6,mode=max
+          cache-from: |
+            type=registry,ref=${{ steps.sources.outputs.cache }}
+            type=registry,ref=${{ steps.sources.outputs.cache_default }}
+          cache-to: type=registry,ref=${{ steps.sources.outputs.cache }},mode=max

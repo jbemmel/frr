@@ -221,7 +221,6 @@ static struct ospf6_lsa *ospf6_lsa_translated_nssa_new(struct ospf6_area *area,
 	struct prefix prefix;
 	struct ospf6 *ospf6 = area->ospf6;
 	ptrdiff_t tag_offset = 0;
-	route_tag_t network_order;
 	struct ospf6_route *range;
 
 	if (IS_OSPF6_DEBUG_NSSA)
@@ -281,11 +280,9 @@ static struct ospf6_lsa *ospf6_lsa_translated_nssa_new(struct ospf6_area *area,
 	}
 	/* External Route Tag */
 	if (CHECK_FLAG(ext->bits_metric, OSPF6_ASBR_BIT_T)) {
-		memcpy(&network_order, (caddr_t)ext + tag_offset,
-		       sizeof(network_order));
-		network_order = htonl(network_order);
-		memcpy(new_ptr, &network_order, sizeof(network_order));
-		new_ptr += sizeof(network_order);
+		/* The received tag is already in network byte order. */
+		memcpy(new_ptr, (caddr_t)ext + tag_offset, sizeof(route_tag_t));
+		new_ptr += sizeof(route_tag_t);
 	}
 
 	/* Fill LSA Header */
@@ -698,6 +695,12 @@ void ospf6_abr_nssa_type_7_defaults(struct ospf6 *ospf6)
 
 void ospf6_abr_nssa_task(struct ospf6 *ospf6)
 {
+	if (ospf6->gr_info.restart_in_progress) {
+		if (IS_OSPF6_DEBUG_NSSA)
+			zlog_debug("%s : Graceful Restart in progress, skip", __func__);
+		return;
+	}
+
 	if (IS_OSPF6_DEBUG_NSSA)
 		zlog_debug("Check for NSSA-ABR Tasks():");
 
@@ -840,24 +843,31 @@ static void ospf6_ase_lsa_refresh(struct ospf6 *o)
 
 void ospf6_area_nssa_update(struct ospf6_area *area)
 {
+	uint8_t old_state = area->NSSATranslatorState;
+
 	if (IS_AREA_NSSA(area)) {
 		OSPF6_OPT_CLEAR(area->options, OSPF6_OPT_E);
 		area->ospf6->anyNSSA++;
 		OSPF6_OPT_SET(area->options, OSPF6_OPT_N);
 		area->NSSATranslatorRole = OSPF6_NSSA_ROLE_CANDIDATE;
-	} else if (IS_AREA_ENABLED(area)) {
+	} else {
 		if (IS_OSPF6_DEBUG_ORIGINATE(ROUTER))
 			zlog_debug("Normal area for if %s", area->name);
 		OSPF6_OPT_CLEAR(area->options, OSPF6_OPT_N);
 		OSPF6_OPT_SET(area->options, OSPF6_OPT_E);
 		area->ospf6->anyNSSA--;
 		area->NSSATranslatorState = OSPF6_NSSA_TRANSLATE_DISABLED;
+		if (old_state != OSPF6_NSSA_TRANSLATE_DISABLED) {
+			--area->ospf6->redist_count;
+			ospf6_asbr_status_update(area->ospf6,
+						 area->ospf6->redist_count);
+		}
 	}
 
 	/* Refresh router LSA */
-	if (IS_AREA_NSSA(area)) {
-		OSPF6_ROUTER_LSA_SCHEDULE(area);
+	OSPF6_ROUTER_LSA_SCHEDULE(area);
 
+	if (IS_AREA_NSSA(area)) {
 		/* Flush external LSAs. */
 		ospf6_asbr_remove_externals_from_area(area);
 

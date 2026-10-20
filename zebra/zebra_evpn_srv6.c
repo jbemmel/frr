@@ -303,8 +303,11 @@ static bool local_update(const struct evpn_srv6_msg *m)
 		return false;
 	struct zebra_if *vxl = zevpn->vxlan_if->info;
 	struct zebra_if *zif = ifp->info;
+	struct zebra_vxlan_vni *mapping = zebra_vxlan_if_vni_find(vxl, zevpn->vni);
+	if (!mapping)
+		return false;
 	if (m->op == EVPN_SRV6_SERVICE) {
-		if (vxl->brslave_info.br_if != ifp)
+		if (zevpn->vxlan_if != ifp)
 			return false;
 	} else {
 		if (zif->brslave_info.br_if != vxl->brslave_info.br_if)
@@ -349,7 +352,8 @@ static bool local_update(const struct evpn_srv6_msg *m)
 	} else {
 		struct ethaddr address;
 		memcpy(&address, m->key, 6);
-		zebra_evpn_add_update_local_mac(zebra_vrf_get_evpn(), zevpn, ifp, &address, 0,
+		zebra_evpn_add_update_local_mac(zebra_vrf_get_evpn(), zevpn, ifp, &address,
+						mapping->access_vlan,
 						false, false, false, NULL);
 	}
 	return true;

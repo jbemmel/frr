@@ -43,3 +43,23 @@ docker build -f docker/vpp-evpn-srv6/Dockerfile \
 CI publishes `linux/amd64`. The runtime starts VPP using
 `/etc/vpp/startup.conf`, as in the lab recipe; lab initialization configures
 and starts FRR separately.
+
+## Build caches
+
+BuildKit exports all intermediate layers to branch-specific GHCR `buildcache-*`
+tags. Builds import their branch cache and the default branch cache, so FRR-only
+changes reuse the VPP packages and dependency-install layers. Commit build
+arguments are declared only where needed; changing FRR's recorded commit does
+not invalidate dependency installation or compilation.
+
+Separate ccache mounts store VPP (2 GB), EVPN plugin (256 MB), and FRR (1 GB)
+compiler results. The workflow restores these through `actions/cache` and
+injects/extracts them with `buildkit-cache-dance`: layer cache exports alone do
+not preserve cache-mount contents. Compiler contents, source, headers, and flags
+still determine cache hits. Each compilation step prints ccache statistics.
+Cache archives live outside the checkout and are saved under a new key per run.
+
+A source edit still reruns FRR's bootstrap/configure, linking, installation, and
+runtime checks, but unchanged compilations can hit ccache. The first run starts
+cold. The `frr-build` target can be built independently to inspect compiler-cache
+behavior without assembling the final image.
