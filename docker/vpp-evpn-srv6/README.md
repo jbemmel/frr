@@ -32,6 +32,11 @@ and checks the FRR executable and plugin shared-library dependencies. Publish
 matching protocol changes to the plugin branch before triggering an FRR build.
 Recorded source identities are in `/usr/share/vpp/evpn/{frr,plugin,vpp}.commit`.
 
+Startup validation runs under GDB in the separate `smoke-test` build stage.
+A startup crash fails immediately and prints a backtrace in the Docker build
+log. Debugger packages stay out of the published runtime; the final image
+copies a success marker from that stage so publishing requires validation.
+
 For a local build from this repository's root:
 
 ```sh
