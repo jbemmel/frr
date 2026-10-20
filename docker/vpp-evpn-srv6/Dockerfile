@@ -172,7 +172,7 @@ COPY --from=evpn-plugin /runtime/ /runtime/
 COPY --from=evpn-plugin /src/evpn/evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
 RUN cmp /src/frr/zebra/zebra_evpn_srv6_wire.h /tmp/evpn_srv6_wire.h
 
-FROM vpp-base
+FROM vpp-base AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libyang3 libprotobuf-c1 libcap2 libelf1 libreadline8 libc-ares2 libjson-c5 \
     && rm -rf /var/lib/apt/lists/*
@@ -193,25 +193,15 @@ RUN mkdir -p /etc/frr /run/frr /var/log/frr /run/vpp \
     && ldd /usr/lib/x86_64-linux-gnu/vpp_plugins/evpn_plugin.so > /tmp/evpn-ldd \
     && cat /tmp/evpn-ldd \
     && if grep -q 'not found' /tmp/evpn-ldd; then exit 1; fi
-# Loading the plugin also catches unresolved VPP symbols that plain ldd misses.
-RUN set -eu; \
-    rm -rf /tmp/evpn-smoke; \
-    mkdir -p /tmp/evpn-smoke/vat; \
-    printf '%s\n' \
-      'unix { nodaemon nosyslog cli-listen /tmp/evpn-smoke/cli.sock }' \
-      'memory { main-heap-page-size 4k }' \
-      'buffers { buffers-per-numa 1024 page-size 4k }' \
-      'plugins { vat-path /tmp/evpn-smoke/vat plugin default { disable } plugin evpn_plugin.so { enable } plugin lacp_plugin.so { enable } }' \
-      > /tmp/evpn-smoke/startup.conf; \
-    vpp -c /tmp/evpn-smoke/startup.conf > /tmp/evpn-smoke/vpp.log 2>&1 & \
-    vpp_pid=$!; \
-    trap 'kill "$vpp_pid" 2>/dev/null || :; wait "$vpp_pid" 2>/dev/null || :; cat /tmp/evpn-smoke/vpp.log' EXIT; \
-    timeout 30 sh -c 'until vppctl -s /tmp/evpn-smoke/cli.sock show version >/dev/null 2>&1; do sleep 0.1; done'; \
-    vppctl -s /tmp/evpn-smoke/cli.sock show plugins > /tmp/evpn-smoke/plugins; \
-    cat /tmp/evpn-smoke/plugins; \
-    grep -q 'evpn_plugin.so' /tmp/evpn-smoke/plugins; \
-    vppctl -s /tmp/evpn-smoke/cli.sock help set interface lacp port-id > /tmp/evpn-smoke/lacp-port-id; \
-    grep -q 'set interface lacp port-id' /tmp/evpn-smoke/lacp-port-id; \
-    kill "$vpp_pid"; wait "$vpp_pid" || :; trap - EXIT; \
-    rm -rf /tmp/evpn-smoke
+# Keep debugger packages out of the published runtime. The final COPY makes
+# successful startup validation a prerequisite of the published image.
+FROM runtime AS smoke-test
+RUN apt-get update && apt-get install -y --no-install-recommends gdb \
+    && rm -rf /var/lib/apt/lists/*
+COPY docker/vpp-evpn-srv6/smoke-test.sh /tmp/evpn-smoke-test.sh
+RUN sh /tmp/evpn-smoke-test.sh \
+    && printf '%s\n' passed > /tmp/evpn-smoke.ok
+
+FROM runtime
+COPY --from=smoke-test /tmp/evpn-smoke.ok /usr/share/vpp/evpn/smoke.ok
 CMD ["/usr/bin/vpp", "-c", "/etc/vpp/startup.conf"]
