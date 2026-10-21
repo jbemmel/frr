@@ -509,6 +509,7 @@ struct dplane_vlan_info {
 struct zebra_dplane_ctx {
 	bool zd_evpn_srv6;
 	uint32_t zd_evpn_srv6_epoch;
+	uint8_t zd_evpn_transport;
 	struct in6_addr zd_evpn_srv6_sid;
 
 	/* Operation code */
@@ -842,6 +843,10 @@ uint32_t zebra_dplane_get_work_limit(void)
 bool dplane_ctx_is_evpn_srv6(const struct zebra_dplane_ctx *ctx)
 {
 	return ctx->zd_evpn_srv6;
+}
+uint8_t dplane_ctx_get_evpn_transport(const struct zebra_dplane_ctx *ctx)
+{
+	return ctx->zd_evpn_transport;
 }
 uint32_t dplane_ctx_get_evpn_srv6_epoch(const struct zebra_dplane_ctx *ctx)
 {
@@ -6413,7 +6418,8 @@ void dplane_mac_init(struct zebra_dplane_ctx *ctx, const struct interface *ifp,
 		if (zevpn)
 			vni = zevpn->vni;
 	}
-	ctx->zd_evpn_srv6 = zebra_evpn_srv6_native(vni);
+	ctx->zd_evpn_transport = zebra_evpn_transport(vni);
+	ctx->zd_evpn_srv6 = ctx->zd_evpn_transport != 0;
 	ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
 	if (ctx->zd_evpn_srv6) {
 		ctx->u.macinfo.vni = vni;
@@ -6711,7 +6717,8 @@ neigh_update_internal(enum dplane_op_e op, const struct interface *ifp,
 	ctx->u.neigh.flags = flags;
 	ctx->u.neigh.vni = vni;
 	if (op == DPLANE_OP_VTEP_ADD || op == DPLANE_OP_VTEP_DELETE) {
-		ctx->zd_evpn_srv6 = zebra_evpn_srv6_native(vni);
+		ctx->zd_evpn_transport = zebra_evpn_transport(vni);
+		ctx->zd_evpn_srv6 = ctx->zd_evpn_transport != 0;
 		ctx->zd_evpn_srv6_epoch = zebra_evpn_srv6_epoch();
 		const struct in6_addr *sid = zebra_evpn_srv6_sid(vni, ip, 3);
 		if (sid)
