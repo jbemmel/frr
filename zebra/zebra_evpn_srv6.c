@@ -57,12 +57,16 @@ uint32_t zebra_evpn_srv6_epoch(void)
 }
 static void agent_send(const struct evpn_srv6_msg *message);
 
-bool zebra_evpn_srv6_native(vni_t vni)
+uint8_t zebra_evpn_transport(vni_t vni)
 {
 	for (struct owned *o = owned; o; o = o->next)
 		if (o->msg.op == EVPN_SRV6_SERVICE && ntohl(o->msg.vni) == vni)
-			return true;
-	return false;
+			return o->msg.type;
+	return 0;
+}
+bool zebra_evpn_srv6_native(vni_t vni)
+{
+	return zebra_evpn_transport(vni) != 0;
 }
 bool zebra_evpn_srv6_native_if(ifindex_t index)
 {
@@ -307,7 +311,8 @@ static bool local_update(const struct evpn_srv6_msg *m)
 	if (!mapping)
 		return false;
 	if (m->op == EVPN_SRV6_SERVICE) {
-		if (zevpn->vxlan_if != ifp)
+		if ((m->type != EVPN_TRANSPORT_VXLAN && m->type != EVPN_TRANSPORT_SRV6) ||
+		    zevpn->vxlan_if != ifp)
 			return false;
 	} else {
 		if (zif->brslave_info.br_if != vxl->brslave_info.br_if)
@@ -460,6 +465,16 @@ static void updates_ready(struct event *event)
 	}
 	event_add_read(zrouter.master, updates_ready, NULL, notify_fd, &notify_event);
 }
+static void encode_peer(uint8_t out[16], const struct ipaddr *peer)
+{
+	memset(out, 0, 16);
+	if (IS_IPADDR_V6(peer))
+		memcpy(out, &peer->ipaddr_v6, 16);
+	else if (IS_IPADDR_V4(peer)) {
+		out[10] = out[11] = 0xff;
+		memcpy(out + 12, &peer->ipaddr_v4, 4);
+	}
+}
 static int provider_process(struct zebra_dplane_provider *prov)
 {
 	int limit = dplane_provider_get_work_limit(prov), count;
@@ -475,6 +490,7 @@ static int provider_process(struct zebra_dplane_provider *prov)
 		enum dplane_op_e op = dplane_ctx_get_op(ctx);
 		struct evpn_srv6_msg m = message_new(EVPN_SRV6_ROUTE, dplane_ctx_mac_get_vni(ctx));
 		bool ok = true;
+		m.transport = dplane_ctx_get_evpn_transport(ctx);
 		m.add = op != DPLANE_OP_MAC_DELETE && op != DPLANE_OP_VTEP_DELETE &&
 			op != DPLANE_OP_NH_FDB_DELETE;
 		if (op == DPLANE_OP_MAC_INSTALL || op == DPLANE_OP_MAC_DELETE) {
@@ -489,7 +505,9 @@ static int provider_process(struct zebra_dplane_provider *prov)
 				m.sw_if_index = htonl(dplane_ctx_get_ifindex(ctx));
 				if (dplane_ctx_mac_get_local_inactive(ctx))
 					m.add = 0;
-			} else
+			} else if (m.transport == EVPN_TRANSPORT_VXLAN)
+				encode_peer(m.sid, dplane_ctx_mac_get_vtep_ip(ctx));
+			else
 				memcpy(m.sid, dplane_ctx_get_evpn_srv6_sid(ctx), 16);
 			ok = queue_update(&m, ctx_epoch);
 		} else if (op == DPLANE_OP_VTEP_ADD || op == DPLANE_OP_VTEP_DELETE) {
@@ -497,8 +515,7 @@ static int provider_process(struct zebra_dplane_provider *prov)
 			m.type = 3;
 			memcpy(m.sid, dplane_ctx_get_evpn_srv6_sid(ctx), 16);
 			const struct ipaddr *peer = dplane_ctx_neigh_get_ipaddr(ctx);
-			if (IS_IPADDR_V6(peer))
-				memcpy(m.key, &peer->ipaddr_v6, 16);
+			encode_peer(m.key, peer);
 			ok = queue_update(&m, ctx_epoch);
 		} else if (op == DPLANE_OP_BR_PORT_UPDATE) {
 			m.op = EVPN_SRV6_DF;

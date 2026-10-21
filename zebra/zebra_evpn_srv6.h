@@ -8,6 +8,7 @@ void zebra_evpn_srv6_sid_zapi(ZAPI_HANDLER_ARGS);
 void zebra_evpn_srv6_local_sid(const struct srv6_sid_ctx *ctx,
                               const struct in6_addr *sid, bool add);
 void zebra_evpn_srv6_local_sid_replay(vni_t vni);
+uint8_t zebra_evpn_transport(vni_t vni);
 bool zebra_evpn_srv6_native(vni_t vni);
 bool zebra_evpn_srv6_native_if(ifindex_t index);
 bool zebra_evpn_srv6_active(void);
